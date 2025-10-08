@@ -1,6 +1,48 @@
 use std::{fs, path::Path};
 
+use candle_core::{Device, Tensor};
+use candle_nn::VarBuilder;
+use candle_nn::init::DEFAULT_KAIMING_NORMAL;
+use candle_nn::ops::softmax;
 use tiktoken_rs::CoreBPE;
+struct SelfAttentionV1 {
+    w_q: Tensor,
+    w_k: Tensor,
+    w_v: Tensor,
+    scaling: f64,
+}
+
+/// The `forward` method of this struct is mapping vector embeddings into context vectors
+impl SelfAttentionV1 {
+    fn new(vb: &VarBuilder, emb_vec_size: usize, d_k: usize) -> eyre::Result<Self> {
+        let w_k = vb.get_with_hints((emb_vec_size, d_k), "W_k", DEFAULT_KAIMING_NORMAL)?;
+        let w_q = vb.get_with_hints((emb_vec_size, d_k), "W_q", DEFAULT_KAIMING_NORMAL)?;
+        let w_v = vb.get_with_hints((emb_vec_size, d_k), "W_v", DEFAULT_KAIMING_NORMAL)?;
+        let out = Self::from_weight_matrices(w_q, w_k, w_v);
+        Ok(out)
+    }
+
+    fn context_vectors(&self, embeddings: &Tensor) -> eyre::Result<Tensor> {
+        let queries = embeddings.matmul(&self.w_q)?;
+        let keys = embeddings.matmul(&self.w_k)?;
+        let att_scores = queries.matmul(&keys.t()?)?;
+        let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
+        let values = embeddings.matmul(&self.w_v)?;
+        let out = att_weights.matmul(&values)?;
+        Ok(out)
+    }
+
+    fn from_weight_matrices(w_q: Tensor, w_k: Tensor, w_v: Tensor) -> Self {
+        let d_k = w_q.dims()[1];
+        let scaling = 1. / (d_k as f64).sqrt();
+        Self {
+            w_q,
+            w_k,
+            w_v,
+            scaling,
+        }
+    }
+}
 
 struct Dataset {
     inputs: Vec<Vec<u32>>,
@@ -240,6 +282,14 @@ mod tests {
         debug_assert_eq!(context.dims()[0], 6);
         debug_assert_eq!(context.dims()[1], value.dims()[1]);
         debug_assert_eq!(context.dims()[1], 2);
+
+        let layer = SelfAttentionV1::from_weight_matrices(w_query, w_key, w_value);
+        let context_alt = layer.context_vectors(&embeddings)?;
+        let ctx_vec = context.to_vec2::<f32>()?;
+        let ctx_alt_vec = context_alt.to_vec2::<f32>()?;
+        for (a, b) in ctx_vec.iter().flatten().zip(ctx_alt_vec.iter().flatten()) {
+            debug_assert!((*a - *b).abs() < 1e-6);
+        }
 
         Ok(())
     }
