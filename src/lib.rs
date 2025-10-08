@@ -1,20 +1,23 @@
 use std::{fs, path::Path};
 
 use candle_core::{Device, Tensor};
-use candle_nn::VarBuilder;
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
+use candle_nn::{Linear, Module, VarBuilder, linear_b};
 use tiktoken_rs::CoreBPE;
-struct SelfAttentionV1 {
-    w_q: Tensor,
-    w_k: Tensor,
-    w_v: Tensor,
+struct SelfAttention<T> {
+    w_q: T,
+    w_k: T,
+    w_v: T,
     scaling: f64,
 }
 
+type SelfAttentionV1 = SelfAttention<Tensor>;
+type SelfAttentionV2 = SelfAttention<Linear>;
+
 /// The `forward` method of this struct is mapping vector embeddings into context vectors
 impl SelfAttentionV1 {
-    fn new(vb: &VarBuilder, emb_vec_size: usize, d_k: usize) -> eyre::Result<Self> {
+    fn new(vb: &VarBuilder, emb_vec_size: usize, d_k: usize) -> candle_core::Result<Self> {
         let w_k = vb.get_with_hints((emb_vec_size, d_k), "W_k", DEFAULT_KAIMING_NORMAL)?;
         let w_q = vb.get_with_hints((emb_vec_size, d_k), "W_q", DEFAULT_KAIMING_NORMAL)?;
         let w_v = vb.get_with_hints((emb_vec_size, d_k), "W_v", DEFAULT_KAIMING_NORMAL)?;
@@ -22,7 +25,7 @@ impl SelfAttentionV1 {
         Ok(out)
     }
 
-    fn context_vectors(&self, embeddings: &Tensor) -> eyre::Result<Tensor> {
+    fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = embeddings.matmul(&self.w_q)?;
         let keys = embeddings.matmul(&self.w_k)?;
         let att_scores = queries.matmul(&keys.t()?)?;
@@ -41,6 +44,54 @@ impl SelfAttentionV1 {
             w_v,
             scaling,
         }
+    }
+}
+
+impl Module for SelfAttentionV1 {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        self.context_vectors(xs)
+    }
+}
+
+impl SelfAttentionV2 {
+    fn new(
+        vb: &VarBuilder,
+        emb_vec_size: usize,
+        d_k: usize,
+        bias: bool,
+    ) -> candle_core::Result<Self> {
+        let w_k = linear_b(emb_vec_size, d_k, bias, vb.pp("W_k"))?;
+        let w_q = linear_b(emb_vec_size, d_k, bias, vb.pp("W_q"))?;
+        let w_v = linear_b(emb_vec_size, d_k, bias, vb.pp("W_v"))?;
+        let out = Self::from_weight_matrices(w_q, w_k, w_v);
+        Ok(out)
+    }
+
+    fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let queries = self.w_q.forward(embeddings)?;
+        let keys = self.w_k.forward(embeddings)?;
+        let att_scores = queries.matmul(&keys.t()?)?;
+        let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
+        let values = self.w_v.forward(embeddings)?;
+        let out = att_weights.matmul(&values)?;
+        Ok(out)
+    }
+
+    fn from_weight_matrices(w_q: Linear, w_k: Linear, w_v: Linear) -> Self {
+        let d_k = w_q.weight().dims()[1];
+        let scaling = 1. / (d_k as f64).sqrt();
+        Self {
+            w_q,
+            w_k,
+            w_v,
+            scaling,
+        }
+    }
+}
+
+impl Module for SelfAttentionV2 {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        self.context_vectors(xs)
     }
 }
 
@@ -289,6 +340,30 @@ mod tests {
         let ctx_alt_vec = context_alt.to_vec2::<f32>()?;
         for (a, b) in ctx_vec.iter().flatten().zip(ctx_alt_vec.iter().flatten()) {
             debug_assert!((*a - *b).abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attention_v1_v2() -> eyre::Result<()> {
+        let embeddings = mock_embeddings()?;
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let att_lay_2 = SelfAttentionV2::new(&vb, embeddings.dims()[1], 2, false)?;
+        let mut att_lay_1 = SelfAttentionV1::from_weight_matrices(
+            att_lay_2.w_q.weight().t()?,
+            att_lay_2.w_k.weight().t()?,
+            att_lay_2.w_v.weight().t()?,
+        );
+        att_lay_1.scaling = att_lay_2.scaling;
+
+        let ctx2 = att_lay_2.forward(&embeddings)?;
+        let ctx1 = att_lay_1.forward(&embeddings)?;
+
+        let ctx2_vec = ctx2.to_vec2::<f32>()?;
+        let ctx1_vec = ctx1.to_vec2::<f32>()?;
+
+        for (a, b) in ctx2_vec.iter().flatten().zip(ctx1_vec.iter().flatten()) {
+            debug_assert!((*a - *b).abs() < 1e-9);
         }
 
         Ok(())
