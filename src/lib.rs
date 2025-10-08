@@ -1,11 +1,12 @@
 use std::{fs, path::Path};
 
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
 use candle_nn::{Linear, Module, VarBuilder, linear_b};
 use tiktoken_rs::CoreBPE;
-struct SelfAttention<T> {
+
+pub struct SelfAttention<T> {
     w_q: T,
     w_k: T,
     w_v: T,
@@ -17,7 +18,7 @@ type SelfAttentionV2 = SelfAttention<Linear>;
 
 /// The `forward` method of this struct is mapping vector embeddings into context vectors
 impl SelfAttentionV1 {
-    fn new(vb: &VarBuilder, emb_vec_size: usize, d_k: usize) -> candle_core::Result<Self> {
+    pub fn new(vb: &VarBuilder, emb_vec_size: usize, d_k: usize) -> candle_core::Result<Self> {
         let w_k = vb.get_with_hints((emb_vec_size, d_k), "W_k", DEFAULT_KAIMING_NORMAL)?;
         let w_q = vb.get_with_hints((emb_vec_size, d_k), "W_q", DEFAULT_KAIMING_NORMAL)?;
         let w_v = vb.get_with_hints((emb_vec_size, d_k), "W_v", DEFAULT_KAIMING_NORMAL)?;
@@ -25,7 +26,7 @@ impl SelfAttentionV1 {
         Ok(out)
     }
 
-    fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = embeddings.matmul(&self.w_q)?;
         let keys = embeddings.matmul(&self.w_k)?;
         let att_scores = queries.matmul(&keys.t()?)?;
@@ -35,7 +36,7 @@ impl SelfAttentionV1 {
         Ok(out)
     }
 
-    fn from_weight_matrices(w_q: Tensor, w_k: Tensor, w_v: Tensor) -> Self {
+    pub fn from_weight_matrices(w_q: Tensor, w_k: Tensor, w_v: Tensor) -> Self {
         let d_k = w_q.dims()[1];
         let scaling = 1. / (d_k as f64).sqrt();
         Self {
@@ -54,7 +55,7 @@ impl Module for SelfAttentionV1 {
 }
 
 impl SelfAttentionV2 {
-    fn new(
+    pub fn new(
         vb: &VarBuilder,
         emb_vec_size: usize,
         d_k: usize,
@@ -67,7 +68,7 @@ impl SelfAttentionV2 {
         Ok(out)
     }
 
-    fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = self.w_q.forward(embeddings)?;
         let keys = self.w_k.forward(embeddings)?;
         let att_scores = queries.matmul(&keys.t()?)?;
@@ -77,7 +78,7 @@ impl SelfAttentionV2 {
         Ok(out)
     }
 
-    fn from_weight_matrices(w_q: Linear, w_k: Linear, w_v: Linear) -> Self {
+    pub fn from_weight_matrices(w_q: Linear, w_k: Linear, w_v: Linear) -> Self {
         let d_k = w_q.weight().dims()[1];
         let scaling = 1. / (d_k as f64).sqrt();
         Self {
@@ -95,17 +96,17 @@ impl Module for SelfAttentionV2 {
     }
 }
 
-struct Dataset {
+pub struct Dataset {
     inputs: Vec<Vec<u32>>,
     targets: Vec<Vec<u32>>,
 }
 
 impl Dataset {
-    fn new(inputs: Vec<Vec<u32>>, targets: Vec<Vec<u32>>) -> Self {
+    pub fn new(inputs: Vec<Vec<u32>>, targets: Vec<Vec<u32>>) -> Self {
         Self { inputs, targets }
     }
 
-    fn from_path<P: AsRef<Path>>(path: P, tokenizer: CoreBPE) -> eyre::Result<Dataset> {
+    pub fn from_path<P: AsRef<Path>>(path: P, tokenizer: CoreBPE) -> eyre::Result<Dataset> {
         let values = fs::read_to_string(path)?;
 
         //map the whole text in tokenids
@@ -127,6 +128,14 @@ impl Dataset {
         }
 
         Ok(Self::new(inputs, targets))
+    }
+
+    pub fn inputs(&self) -> &[Vec<u32>] {
+        &self.inputs
+    }
+
+    pub fn targets(&self) -> &[Vec<u32>] {
+        &self.targets
     }
 }
 
