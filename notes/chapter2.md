@@ -1,0 +1,70 @@
+Core teps: 
+- **Tokenization**: converting human-readable text into tokens (arbitrary integers) digestible by the LLM. This is a preliminary step before embedding. 
+  - It is performed by a **Tokenizer**, which internally uses regex to chunk the text into substrings, and then maps each substring into a token id (an integer).
+    - By keeping internally the bi-jective dictionary of token-ids, it can also decode a sequence of token ids back into human-readable text.
+  - Typically, a special token is injected in the inner dictionary as a fallback for unknown substrings (for example, `<unk>` or `<|unknown|>`). This is useful to deal with neologisms or typos.
+  - The use of special tokens might be a true hack to inject some structure into the text. For example, a special token like `<|endoftext|>` can be used as a separator to distinguish different documents in the training set.
+  - To understand which tokens are recognized and which are not by the tokenizer, you can start from a generic sentence, encode it (it wil include the special token id for unknown substrings), and then decode it back to see which substrings have been replaced by the special token.
+  - In order to avoid the special token `<|unknown|>`, a lot of tokenizers use the **BPE** (byte-pair-encoding) technique, which is a compromise between word-level tokenization (full semanthic, huge dictionary) and char-level tokenization (small dictionary but poor semanthic). BPE bases its tokenization on subwords, which is also a nice technique that allows to tokenize neologisms or unknown words.
+
+
+- **Embeddings**: mapping discrte objects (words, sentences, images, ...) into a continuous vector space of a certain dimension. In other words, an embedding is a map `f: object -> R^d` mapping arbitrary data into tensors of dimension `d`.
+  - gpt2 uses embeddinds of dimension 768, while gpt3 uses embeddings of dimension 12288. 
+  - Word embeddings: mapping words into vectors
+	   - Example: Word2Vec, GloVe
+  - Each token id obtained during tokenization is simply a "row index" that allows to select a certain embedding vector from the **embedding matrix**.
+  - Typically, to the embedding vector is added a **positional embedding** (which is specific for each position in the sentence) to incorporate positional information. This causes same subwords (same token ids) to be mapped into different embedding vectors if they are in different positions.
+  - As a result, if you pass `input` or `target` matrices having dimension `(batch_size, max_length)` to the embedding layer, you will obtain `input` and `target` tensors having dimension `(batch_size, max_length, d)`, where `d` is the dimension of the embedding space (for example, 768 for gpt2), because each token id is mapped into an embedding vector of dimension `d`.
+
+Core components:
+- **Tokenizer**: converts human readable text in tokens digestible by the LLM: 
+	- Most of them rely on **BPE** (byte-pair-encoding) models, which is the compromise beteen word-level tokenization (full semanthic, huge dictionary) and char-level tokenization (small dictionary but poor semanthic). BPE bases its tokenization on subwords, which is also a nice technique that allows to tokenize neologisms or unknown words. 
+	- For example, suppose that the tokenizer knows how to tokenize `un->1234`, `happy->5678`, `ness->9012`. The encoding for `unhappyness` will be `[1234,5678,9012]`
+	- Typically, common words like `the` get single token (i.e. a single integer representation), while complex words get multiple tokens
+	- As a result, the two core ingredients for a BPE tokenizer are:
+		- The underlying dictionary/lookup table: `substr -> token`
+		- The **greedy mathing algorithm** which, given arbitrary text, chunks it down efficiently to maximize the number of succesfull lookups in the inner dictionary
+	- The name "BPE" hides how this tokenizer is trained:
+		- the input text is reduced at char-level
+		- each char is then paired with the consequent one
+		- now you have a list of two-chars
+		- the most frequent pairs is appended to the internal dictionary,megred as a single substring, and an arbitrary token-id is assigned to it (like a counter)
+    		- token-ids are completely arbitrary, they can be also defined based on the alphabetical order of the words appended in the dictionary.
+		- then the text is split again based on the internal tokens (pair of chars),
+		- the pairings are created again, and counted based on their frequency. The most frequent pairs are appended to the internal dictionary, merged as a single substring, with an arbitrary id and so on...
+	- Notice that at each iteration, the number of tokens (which is the cardinality of the internal dictionary), because the substring cumulates at each iteraction (example: "l", "lo", "low", "lower", ...)
+	- If no stopping criterion is set, also the token of the whole input text would be created
+	- For this reason, trainers typically set a `target` number of tokens, so that the training loop exits once that the cardinality of the dictionary reaches that target. 
+	- The number of tokens is indeed a hyperparameter of the tokenizer and brings its own tradeoffs. In particular, a bigger dictionary:
+		- reduces the number of token ids required to encode a sentence
+		- is bigger, so requires more memory and lookups are heavier
+		- is less flexible dealing with unseen words
+	- As a result, a tokenizer with huge number of tokens is better suited for stable domains with specific words (law, code)
+	- Notice also that the token IDs do not bear any meaning and do not cause mathematical instability within the tokenizer.
+	- The library `tiktoken_rs` contains some pre-trained tokenizers used by famous models
+
+- **Dataset Preparator (Embeddings)**: its role is to prepare the human-readable-text into a dataset to train the llm
+	- It uses the `Tokenizer` to get the tokenized-version of the test
+	- So now we are dealing with a vector of integers which is going to be small is the tokenizer was trained using a lot of tokens
+	- The first step of the preparation is to create the example matrices (`GPTDatasetV1`), which consist of the `input` matrix and the `target` matrix. Notice that these are matrices of token ids.
+	- the i-th example is made of the i-th input row and the i-th target row.
+	- Notice that the column number (`max_length`) defines the number of tokens per example (you have `max_length` tokens for the i-th input row and `max_length` tokens for the i-th target row). This value is typically set to `256`
+	- The `input` row correspond to `max_length` token ids and the `target` row corresponds to the input token ids shifted by one: for example, suppose that you have a word-based tokenizerand you have the input "The cat is on the table". If `max_length` is 3, you would have the first example as `input=["The ", "cat ", "is "]; target=["cat ", "is ", "on "]` (notice that you would have the token ids associated with the strings, not the strings themselves)
+	- The parameter `stride` controls how much you shift in words between two examples. Following the example above, if `stride=2`, the second example would be `input=["is ", "on ", "the "]; target=["on ", "the ", "table "]`
+	- Now that we have the `input` and `target` matrix of token ids (both will have dimension `(num_examples, max_lenght)`): the final step to make data digestible is to create a collection of batch examples (with randomized order if we want).
+	- So we create a collection of matrices having dimension `(bath_size,max_length)`. Since it is a collection of submatrices, it is called a "tensor", since each token id is characterized by 3 dimensions: 
+		- the batch including its example
+		- in which example of the batch it is included
+		- the position within the example
+	- Tou can imagine the tensor as `input_tensor=[input_b1, input_b2, ...]` where `input_b1=[input_example7, input_example2]` (analogously, `target_b1=[target_example7, target_example2]`)
+	- A smaller batch size is less memory intensive, but it is less stable during training (the gradient is noisier), resulting in noisier updates.
+	- Currently we have token ids, which are totally arbitrary. In order to feed valid input in the llm, **we need to convert token ids into embedding vector**. 
+	- TO accomplish this task, you need an **embedding layer**, containing an internal matrix capable of mapping token ids into embedding vectors
+    	- This matrix is initialized with random values, and it will be adjusted during the training of the llm
+    	- The embedding layer creates embedding vectors setting each entry of the embedding vector as a 
+    	- Notice that the embedding mapping is `f: token_id -> R^d`, where `d` is the dimension of the embedding space (for example, 768 for gpt2)
+        	- As a result, each individual token id is mapped into a vector of dimension `d`
+        	- Typically, the embedding matrix has as many rows as the number of tokens in the tokenizer dictionary and, to return the embedding vector f token id "i" **it simply looks-up the i-th vector of the embedding matrix**
+        	- In order to encorporate positional information, a **positional embedding** is added to the token embedding, that is specific for each position
+            	- As a result, the same token id in a sentence is actually mapped into different embedding vectors bit sits in different positions. Each embedding is the resul of the addition between the same token embedding and different positional embeddings.
+            	- Also these positional embeddings are typically fitted during training
