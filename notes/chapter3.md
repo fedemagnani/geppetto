@@ -52,3 +52,8 @@ Before 2017, the **RNNs were the most popular encoder-decoder arhcitecture**:
     - This scaling is also the reason why this attention mechanism is called **"scaled dot-product attention"**
   - Finally, the context vectors are computed as **context_vectors = attention_weights @ value_matrix**
     - As before, the trivial self-attention mechanis is like computing the context vectors setting the weight values **W_v = identity matrix**
+
+- **Causal/Masked attention** is an attention mechanism based on computing attention scores just by looking to previous inputs.
+- The goal is to come up with a lower-triangular matrix of attention weights
+  - The "lazy" way is computing attention scores as usual, then extracting the lower-diagonal part (masking) and normalize again iterating on each row (renormalization)
+  - Fortunately, this combination of masking + renormalization saves from information leakage, so is absolutely viable

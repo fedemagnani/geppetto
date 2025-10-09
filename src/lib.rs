@@ -26,11 +26,16 @@ impl SelfAttentionV1 {
         Ok(out)
     }
 
-    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = embeddings.matmul(&self.w_q)?;
         let keys = embeddings.matmul(&self.w_k)?;
         let att_scores = queries.matmul(&keys.t()?)?;
         let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
+        Ok(att_weights)
+    }
+
+    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let att_weights = self.attention_weights(embeddings)?;
         let values = embeddings.matmul(&self.w_v)?;
         let out = att_weights.matmul(&values)?;
         Ok(out)
@@ -68,11 +73,16 @@ impl SelfAttentionV2 {
         Ok(out)
     }
 
-    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = self.w_q.forward(embeddings)?;
         let keys = self.w_k.forward(embeddings)?;
         let att_scores = queries.matmul(&keys.t()?)?;
         let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
+        Ok(att_weights)
+    }
+
+    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let att_weights = self.attention_weights(embeddings)?;
         let values = self.w_v.forward(embeddings)?;
         let out = att_weights.matmul(&values)?;
         Ok(out)
@@ -373,6 +383,83 @@ mod tests {
 
         for (a, b) in ctx2_vec.iter().flatten().zip(ctx1_vec.iter().flatten()) {
             debug_assert!((*a - *b).abs() < 1e-9);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn causal_attention_via_masking_and_renormalization_mean() -> eyre::Result<()> {
+        let embeddings = mock_embeddings()?;
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], 2)?;
+
+        let att_weights = att_layer.attention_weights(&embeddings)?;
+        let att_weights = att_weights.to_vec2::<f32>()?;
+
+        let att_weights = att_weights
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| {
+                // masking
+                let m = x.len();
+                let mut out: Vec<f32> = x
+                    .into_iter()
+                    .take(i + 1)
+                    .chain(vec![0.; m - i - 1])
+                    .collect();
+
+                //renormalization
+                let sum: f32 = out.iter().sum();
+                for o in out.iter_mut() {
+                    *o /= sum
+                }
+                out
+            })
+            .collect::<Vec<Vec<f32>>>();
+
+        for row in att_weights.into_iter() {
+            let s: f32 = row.into_iter().sum();
+            debug_assert!((s - 1.).abs() < 1e-6);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn causal_attention_via_masking_and_renormalization_softmax() -> eyre::Result<()> {
+        let embeddings = mock_embeddings()?;
+        let emb_row = embeddings.dims()[0];
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], 2)?;
+
+        let att_weights = att_layer.attention_weights(&embeddings)?;
+        let att_weights = att_weights.to_vec2::<f32>()?;
+
+        let att_weights = att_weights
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, x)| {
+                // masking
+                let m = x.len();
+                let out: Vec<f32> = x
+                    .into_iter()
+                    .take(i + 1)
+                    .chain(vec![0.; m - i - 1])
+                    .collect();
+                out
+            })
+            .collect::<Vec<f32>>();
+
+        let att_weights = Tensor::from_vec(att_weights, (emb_row, emb_row), embeddings.device())?;
+
+        let att_weights = softmax(&att_weights, 1)?;
+
+        let att_weights = att_weights.to_vec2::<f32>()?;
+
+        for row in att_weights.into_iter() {
+            let s: f32 = row.into_iter().sum();
+            debug_assert!((s - 1.).abs() < 1e-6);
         }
 
         Ok(())
