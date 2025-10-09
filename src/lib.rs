@@ -1,9 +1,9 @@
 use std::{fs, path::Path};
 
-use candle_core::Tensor;
+use candle_core::{D, Device, Tensor};
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
-use candle_nn::{Linear, Module, VarBuilder, linear_b};
+use candle_nn::{Dropout, Linear, Module, VarBuilder, linear_b};
 use tiktoken_rs::CoreBPE;
 
 pub struct SelfAttention<T> {
@@ -15,6 +15,13 @@ pub struct SelfAttention<T> {
 
 type SelfAttentionV1 = SelfAttention<Tensor>;
 type SelfAttentionV2 = SelfAttention<Linear>;
+pub struct CausalAttention<T> {
+    attention: SelfAttention<T>,
+    dropout: Dropout,
+}
+
+type CausalAttentionV1 = CausalAttention<Tensor>;
+type CausalAttentionV2 = CausalAttention<Linear>;
 
 /// The `forward` method of this struct is mapping vector embeddings into context vectors
 impl SelfAttentionV1 {
@@ -26,10 +33,15 @@ impl SelfAttentionV1 {
         Ok(out)
     }
 
-    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn attention_scores(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = embeddings.matmul(&self.w_q)?;
         let keys = embeddings.matmul(&self.w_k)?;
-        let att_scores = queries.matmul(&keys.t()?)?;
+        let att_scores = queries.matmul(&keys.transpose(D::Minus2, D::Minus1)?)?;
+        Ok(att_scores)
+    }
+
+    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let att_scores = self.attention_scores(embeddings)?;
         let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
         Ok(att_weights)
     }
@@ -73,10 +85,15 @@ impl SelfAttentionV2 {
         Ok(out)
     }
 
-    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn attention_scores(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
         let queries = self.w_q.forward(embeddings)?;
         let keys = self.w_k.forward(embeddings)?;
         let att_scores = queries.matmul(&keys.t()?)?;
+        Ok(att_scores)
+    }
+
+    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let att_scores = self.attention_scores(embeddings)?;
         let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
         Ok(att_weights)
     }
@@ -103,6 +120,120 @@ impl SelfAttentionV2 {
 impl Module for SelfAttentionV2 {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         self.context_vectors(xs)
+    }
+}
+
+impl<T> CausalAttention<T> {
+    pub fn get_mask(size: usize, device: &Device) -> candle_core::Result<Tensor> {
+        let mask: Vec<_> = (0..size)
+            .flat_map(|i| (0..size).map(move |j| u32::from(j > i)))
+            .collect();
+        let out = Tensor::from_slice(&mask, (size, size), device)?;
+        Ok(out)
+    }
+
+    pub fn masked_fill(
+        on_false: &Tensor,
+        mask: &Tensor,
+        on_true: f32,
+    ) -> candle_core::Result<Tensor> {
+        let shape = mask.shape();
+        let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+        let m = mask.where_cond(&on_true, on_false)?;
+        Ok(m)
+    }
+}
+
+impl CausalAttentionV1 {
+    pub fn new(
+        vb: &VarBuilder,
+        emb_vec_size: usize,
+        d_k: usize,
+        p_drop: f32,
+    ) -> candle_core::Result<Self> {
+        let attention = SelfAttentionV1::new(vb, emb_vec_size, d_k)?;
+        let dropout = Dropout::new(p_drop);
+        let out = Self { attention, dropout };
+        Ok(out)
+    }
+
+    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let (batches, num_tokens, _) = embeddings.dims3()?;
+        let att_scores = self.attention.attention_scores(embeddings)?;
+
+        let mask = Self::get_mask(num_tokens, embeddings.device())?;
+        let masked = Self::masked_fill(
+            &att_scores,
+            &mask.broadcast_left(batches).unwrap(),
+            f32::NEG_INFINITY,
+        )?;
+
+        // scale
+        let mut att_weights = softmax(&(masked * self.attention.scaling)?, D::Minus1)?;
+        // dropout
+        att_weights = self.dropout.forward(&att_weights, true).unwrap();
+
+        Ok(att_weights)
+    }
+
+    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let att_weights = self.attention_weights(embeddings)?;
+        let values = self.attention.w_v.matmul(embeddings)?;
+        let out = att_weights.matmul(&values)?;
+        Ok(out)
+    }
+
+    pub fn from_weight_matrices(w_q: Tensor, w_k: Tensor, w_v: Tensor, p_drop: f32) -> Self {
+        let attention = SelfAttentionV1::from_weight_matrices(w_q, w_k, w_v);
+        let dropout = Dropout::new(p_drop);
+        Self { attention, dropout }
+    }
+}
+
+impl CausalAttentionV2 {
+    pub fn new(
+        vb: &VarBuilder,
+        emb_vec_size: usize,
+        d_k: usize,
+        bias: bool,
+        p_drop: f32,
+    ) -> candle_core::Result<Self> {
+        let attention = SelfAttentionV2::new(vb, emb_vec_size, d_k, bias)?;
+        let dropout = Dropout::new(p_drop);
+        let out = Self { attention, dropout };
+        Ok(out)
+    }
+
+    pub fn from_weight_matrices(w_q: Linear, w_k: Linear, w_v: Linear, p_drop: f32) -> Self {
+        let attention = SelfAttentionV2::from_weight_matrices(w_q, w_k, w_v);
+        let dropout = Dropout::new(p_drop);
+        Self { attention, dropout }
+    }
+
+    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let (batches, num_tokens, _) = embeddings.dims3()?;
+        let att_scores = self.attention.attention_scores(embeddings)?;
+
+        let mask = Self::get_mask(num_tokens, embeddings.device())?;
+        let masked = Self::masked_fill(
+            &att_scores,
+            &mask.broadcast_left(batches).unwrap(),
+            f32::NEG_INFINITY,
+        )?;
+
+        // scale
+        let mut att_weights = softmax(&(masked * self.attention.scaling)?, D::Minus1)?;
+        // dropout
+        att_weights = self.dropout.forward(&att_weights, true).unwrap();
+
+        Ok(att_weights)
+    }
+
+    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        let att_weights = self.attention_weights(embeddings)?;
+        let values = self.attention.w_v.forward(embeddings)?;
+        let out = att_weights.matmul(&values)?;
+        Ok(out)
     }
 }
 
@@ -154,7 +285,11 @@ mod tests {
 
     use super::*;
     use candle_core::{DType, Device, Tensor};
-    use candle_nn::{VarBuilder, VarMap, embedding, init::DEFAULT_KAIMING_NORMAL, ops::softmax};
+    use candle_nn::{
+        Dropout, VarBuilder, VarMap, embedding,
+        init::DEFAULT_KAIMING_NORMAL,
+        ops::{dropout, softmax},
+    };
     use eyre::eyre;
     use tiktoken_rs::{CoreBPE, get_bpe_from_model};
 
@@ -391,35 +526,36 @@ mod tests {
     #[test]
     fn causal_attention_via_masking_and_renormalization_mean() -> eyre::Result<()> {
         let embeddings = mock_embeddings()?;
+        let emb_row = embeddings.dims()[0];
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
         let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], 2)?;
 
         let att_weights = att_layer.attention_weights(&embeddings)?;
         let att_weights = att_weights.to_vec2::<f32>()?;
 
-        let att_weights = att_weights
-            .into_iter()
-            .enumerate()
-            .map(|(i, x)| {
-                // masking
-                let m = x.len();
-                let mut out: Vec<f32> = x
-                    .into_iter()
-                    .take(i + 1)
-                    .chain(vec![0.; m - i - 1])
-                    .collect();
+        let n = att_weights.len();
+        let m = att_weights[0].len();
+        debug_assert_eq!(n, emb_row);
+        debug_assert_eq!(m, emb_row);
+        let mut masked = Vec::with_capacity(n * m);
 
-                //renormalization
-                let sum: f32 = out.iter().sum();
-                for o in out.iter_mut() {
-                    *o /= sum
-                }
-                out
-            })
-            .collect::<Vec<Vec<f32>>>();
+        for (i, row) in att_weights.into_iter().enumerate() {
+            let mut sum: f32 = row[..=i].iter().sum();
+            if sum == 0.0 {
+                sum = 1.0;
+            }
+            let inv_sum = 1.0 / sum;
 
-        for row in att_weights.into_iter() {
-            let s: f32 = row.into_iter().sum();
+            // normalized active part
+            for &v in &row[..=i] {
+                masked.push(v * inv_sum);
+            }
+            // masked zeros
+            masked.resize(masked.len() + (m - i - 1), 0.0);
+        }
+
+        for row in masked.chunks(m) {
+            let s: f32 = row.iter().sum();
             debug_assert!((s - 1.).abs() < 1e-6);
         }
 
@@ -430,37 +566,74 @@ mod tests {
     fn causal_attention_via_masking_and_renormalization_softmax() -> eyre::Result<()> {
         let embeddings = mock_embeddings()?;
         let emb_row = embeddings.dims()[0];
+        let d_k = 2;
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
-        let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], 2)?;
+        let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], d_k)?;
 
         let att_weights = att_layer.attention_weights(&embeddings)?;
         let att_weights = att_weights.to_vec2::<f32>()?;
 
-        let att_weights = att_weights
-            .into_iter()
-            .enumerate()
-            .flat_map(|(i, x)| {
-                // masking
-                let m = x.len();
-                let out: Vec<f32> = x
-                    .into_iter()
-                    .take(i + 1)
-                    .chain(vec![0.; m - i - 1])
-                    .collect();
-                out
-            })
-            .collect::<Vec<f32>>();
+        // Preallocate once
+        let n = att_weights.len();
+        let m = att_weights[0].len();
+        debug_assert_eq!(n, emb_row);
+        debug_assert_eq!(m, emb_row);
+        let mut masked = Vec::with_capacity(n * m);
 
-        let att_weights = Tensor::from_vec(att_weights, (emb_row, emb_row), embeddings.device())?;
+        for (i, row) in att_weights.into_iter().enumerate() {
+            // Only take up to i+1 actual weights
+            masked.extend_from_slice(&row[..=i]);
+            // Then pad with zeros
+            masked.resize(masked.len() + (m - i - 1), 0.0);
+        }
 
-        let att_weights = softmax(&att_weights, 1)?;
+        let att_weights = Tensor::from_vec(masked, (emb_row, emb_row), embeddings.device())?;
+
+        //renormalization
+        let att_weights = softmax(&(att_weights * (1. / d_k as f64).sqrt())?, 1)?;
 
         let att_weights = att_weights.to_vec2::<f32>()?;
-
         for row in att_weights.into_iter() {
             let s: f32 = row.into_iter().sum();
             debug_assert!((s - 1.).abs() < 1e-6);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn causal_attention_dropout_1() -> eyre::Result<()> {
+        let embeddings = mock_embeddings()?;
+        let emb_row = embeddings.dims()[0];
+        let d_k = 2;
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], d_k)?;
+
+        let att_weights = att_layer.attention_weights(&embeddings)?;
+
+        // dropping out 50% of the elements
+        let att_weights = dropout(&att_weights, 0.5)?;
+        debug_assert_eq!(att_weights.dims()[0], emb_row);
+        debug_assert_eq!(att_weights.dims()[1], emb_row);
+
+        Ok(())
+    }
+
+    #[test]
+    fn causal_attention_dropout_2() -> eyre::Result<()> {
+        let embeddings = mock_embeddings()?;
+        let emb_row = embeddings.dims()[0];
+        let d_k = 2;
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let att_layer = SelfAttentionV1::new(&vb, embeddings.dims()[1], d_k)?;
+
+        let att_weights = att_layer.attention_weights(&embeddings)?;
+
+        // dropping out 50% of the elements
+        let dropout_layer = Dropout::new(0.5);
+        let att_weights = dropout_layer.forward(&att_weights, true)?;
+        debug_assert_eq!(att_weights.dims()[0], emb_row);
+        debug_assert_eq!(att_weights.dims()[1], emb_row);
 
         Ok(())
     }
