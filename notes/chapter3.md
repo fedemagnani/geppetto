@@ -57,3 +57,9 @@ Before 2017, the **RNNs were the most popular encoder-decoder arhcitecture**:
 - The goal is to come up with a lower-triangular matrix of attention weights
   - The "lazy" way is computing attention scores as usual, then extracting the lower-diagonal part (masking) and normalize again iterating on each row (renormalization)
   - Fortunately, this combination of masking + renormalization saves from information leakage, so is absolutely viable
+
+- **Multi-Headed attention**: In multi-headed attention you have multiple sets of (W_q, W_k, W_v) matrices
+  - each set (W_q, W_k, W_v) is called a **"head"**. Each "head" computes its own context vectors and is trained independently.
+  - The attention mechanism employed in each head can be causal (the matrix of attention weights will be masked) or not
+  - The attention mechanism is run in parralel (one thread per head), 
+  - We know that each head produces a matrix of context vectors (one context vector per input vector embedding), so a multi-headed attention with "h" heads produces a stack of **"h" context matrices**. These matrices are horizontally concatenated, so that if each context matrix has `d_out` columns, the resulting concatenated matrix will have `h * d_out` columns. The number of rows remain the same, equal to the number of input vector embeddings

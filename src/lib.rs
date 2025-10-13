@@ -13,15 +13,45 @@ pub struct SelfAttention<T> {
     scaling: f64,
 }
 
+pub trait AttentionLayer: Module {}
+
 type SelfAttentionV1 = SelfAttention<Tensor>;
+impl AttentionLayer for SelfAttentionV1 {}
 type SelfAttentionV2 = SelfAttention<Linear>;
+impl AttentionLayer for SelfAttentionV2 {}
 pub struct CausalAttention<T> {
     attention: SelfAttention<T>,
     dropout: Dropout,
 }
 
-type CausalAttentionV1 = CausalAttention<Tensor>;
 type CausalAttentionV2 = CausalAttention<Linear>;
+impl AttentionLayer for CausalAttentionV2 {}
+
+pub struct MultiHeadAttention<L: AttentionLayer>(Vec<L>);
+impl<L: AttentionLayer> From<Vec<L>> for MultiHeadAttention<L> {
+    fn from(value: Vec<L>) -> Self {
+        Self(value)
+    }
+}
+impl<L: AttentionLayer> FromIterator<L> for MultiHeadAttention<L> {
+    fn from_iter<T: IntoIterator<Item = L>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<L: AttentionLayer> Module for MultiHeadAttention<L> {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        let ctx_matrices = self
+            .0
+            .iter()
+            .map(|l| l.forward(xs))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Last dimenion = column = D::Minus1
+        let out = Tensor::cat(&ctx_matrices, D::Minus1)?;
+        Ok(out)
+    }
+}
 
 /// The `forward` method of this struct is mapping vector embeddings into context vectors
 impl SelfAttentionV1 {
@@ -29,14 +59,20 @@ impl SelfAttentionV1 {
         let w_k = vb.get_with_hints((emb_vec_size, d_k), "W_k", DEFAULT_KAIMING_NORMAL)?;
         let w_q = vb.get_with_hints((emb_vec_size, d_k), "W_q", DEFAULT_KAIMING_NORMAL)?;
         let w_v = vb.get_with_hints((emb_vec_size, d_k), "W_v", DEFAULT_KAIMING_NORMAL)?;
-        let out = Self::from_weight_matrices(w_q, w_k, w_v);
+        let out: SelfAttention<Tensor> = Self::from_weight_matrices(w_q, w_k, w_v);
         Ok(out)
     }
 
     pub fn attention_scores(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+        // E @ (Wq @ Wk.T) @ E.T
         let queries = embeddings.matmul(&self.w_q)?;
         let keys = embeddings.matmul(&self.w_k)?;
-        let att_scores = queries.matmul(&keys.transpose(D::Minus2, D::Minus1)?)?;
+        // Recall that
+        //  - D::Minus1: last dimenion (columns)
+        //  - D::Minus2: second-to-last dimension (rows)
+        // let att_scores = queries.broadcast_matmul(&keys.transpose(D::Minus2, D::Minus1)?)?;
+        let att_scores = queries.matmul(&keys.t()?)?;
+
         Ok(att_scores)
     }
 
@@ -144,52 +180,6 @@ impl<T> CausalAttention<T> {
     }
 }
 
-impl CausalAttentionV1 {
-    pub fn new(
-        vb: &VarBuilder,
-        emb_vec_size: usize,
-        d_k: usize,
-        p_drop: f32,
-    ) -> candle_core::Result<Self> {
-        let attention = SelfAttentionV1::new(vb, emb_vec_size, d_k)?;
-        let dropout = Dropout::new(p_drop);
-        let out = Self { attention, dropout };
-        Ok(out)
-    }
-
-    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
-        let (batches, num_tokens, _) = embeddings.dims3()?;
-        let att_scores = self.attention.attention_scores(embeddings)?;
-
-        let mask = Self::get_mask(num_tokens, embeddings.device())?;
-        let masked = Self::masked_fill(
-            &att_scores,
-            &mask.broadcast_left(batches).unwrap(),
-            f32::NEG_INFINITY,
-        )?;
-
-        // scale
-        let mut att_weights = softmax(&(masked * self.attention.scaling)?, D::Minus1)?;
-        // dropout
-        att_weights = self.dropout.forward(&att_weights, true).unwrap();
-
-        Ok(att_weights)
-    }
-
-    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
-        let att_weights = self.attention_weights(embeddings)?;
-        let values = self.attention.w_v.matmul(embeddings)?;
-        let out = att_weights.matmul(&values)?;
-        Ok(out)
-    }
-
-    pub fn from_weight_matrices(w_q: Tensor, w_k: Tensor, w_v: Tensor, p_drop: f32) -> Self {
-        let attention = SelfAttentionV1::from_weight_matrices(w_q, w_k, w_v);
-        let dropout = Dropout::new(p_drop);
-        Self { attention, dropout }
-    }
-}
-
 impl CausalAttentionV2 {
     pub fn new(
         vb: &VarBuilder,
@@ -237,6 +227,11 @@ impl CausalAttentionV2 {
     }
 }
 
+impl Module for CausalAttentionV2 {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        self.context_vectors(xs)
+    }
+}
 pub struct Dataset {
     inputs: Vec<Vec<u32>>,
     targets: Vec<Vec<u32>>,
@@ -635,6 +630,51 @@ mod tests {
         debug_assert_eq!(att_weights.dims()[0], emb_row);
         debug_assert_eq!(att_weights.dims()[1], emb_row);
 
+        Ok(())
+    }
+
+    #[test]
+    fn causal_attention_2() -> eyre::Result<()> {
+        let e = mock_embeddings()?;
+        let embeddings = Tensor::stack(&[&e, &e], 0)?;
+        let num_batches = embeddings.dims()[0];
+        let emb_row = embeddings.dims()[1];
+        let emb_col = embeddings.dims()[2];
+
+        let d_k = 2;
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let att_layer = CausalAttentionV2::new(&vb, emb_col, d_k, true, 0.5)?;
+
+        let ctx_mat = att_layer.forward(&embeddings)?;
+
+        debug_assert_eq!(ctx_mat.dims()[0], num_batches);
+        debug_assert_eq!(ctx_mat.dims()[1], emb_row);
+        debug_assert_eq!(ctx_mat.dims()[2], d_k);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_head_causal_attention() -> eyre::Result<()> {
+        let embeddings = mock_embeddings()?;
+        // We append another dimension to specify number of batches
+        let embeddings = embeddings.unsqueeze(0)?;
+        let num_batches = embeddings.dims()[0];
+        let emb_rows = embeddings.dims()[1];
+        let emb_cols = embeddings.dims()[2];
+
+        let d_out = 2;
+        let h = 4;
+
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
+        let attentions = (0..h).map(|_| SelfAttentionV2::new(&vb, emb_cols, d_out, true));
+        let multi_head = attentions.collect::<Result<MultiHeadAttention<_>, _>>()?;
+
+        let cont_matrices = multi_head.forward(&embeddings)?;
+
+        debug_assert_eq!(cont_matrices.dims()[0], num_batches);
+        debug_assert_eq!(cont_matrices.dims()[1], emb_rows);
+        debug_assert_eq!(cont_matrices.dims()[2], h * d_out);
         Ok(())
     }
 }
