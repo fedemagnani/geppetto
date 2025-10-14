@@ -1,9 +1,10 @@
+use core::f32;
 use std::{fs, path::Path};
 
 use candle_core::{D, Device, Tensor};
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
-use candle_nn::{Dropout, Linear, Module, VarBuilder, linear_b};
+use candle_nn::{Dropout, Linear, Module, ModuleT, VarBuilder, linear_b};
 use tiktoken_rs::CoreBPE;
 
 pub struct SelfAttention<T> {
@@ -27,19 +28,19 @@ pub struct CausalAttention<T> {
 type CausalAttentionV2 = CausalAttention<Linear>;
 impl AttentionLayer for CausalAttentionV2 {}
 
-pub struct MultiHeadAttention<L: AttentionLayer>(Vec<L>);
-impl<L: AttentionLayer> From<Vec<L>> for MultiHeadAttention<L> {
+pub struct MultiHeadAttentionWrapper<L: AttentionLayer>(Vec<L>);
+impl<L: AttentionLayer> From<Vec<L>> for MultiHeadAttentionWrapper<L> {
     fn from(value: Vec<L>) -> Self {
         Self(value)
     }
 }
-impl<L: AttentionLayer> FromIterator<L> for MultiHeadAttention<L> {
+impl<L: AttentionLayer> FromIterator<L> for MultiHeadAttentionWrapper<L> {
     fn from_iter<T: IntoIterator<Item = L>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl<L: AttentionLayer> Module for MultiHeadAttention<L> {
+impl<L: AttentionLayer> Module for MultiHeadAttentionWrapper<L> {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         let ctx_matrices = self
             .0
@@ -272,6 +273,118 @@ impl Dataset {
 
     pub fn targets(&self) -> &[Vec<u32>] {
         &self.targets
+    }
+}
+
+pub struct MultiHeadAttention {
+    num_heads: usize, // number of heads in the multi head attention systems
+    d_out: usize,     // columns of the (big) weight matrix
+    head_dim: usize,  // columns of the weight matrix for each hed
+    w_q: Linear,      // (big) query weight
+    w_k: Linear,      // (big) key weight
+    w_v: Linear,      // (big) value weight
+    out_proj: Linear,
+    scaling: f64,     //computed based on the number of columns of each head
+    dropout: Dropout, // involved in causal attention
+}
+
+impl MultiHeadAttention {
+    pub fn new(
+        vb: &VarBuilder,
+        num_heads: usize,
+        emb_vec_size: usize,
+        head_dim: usize,
+        bias: bool,
+        drop_p: f32,
+    ) -> candle_core::Result<Self> {
+        let d_k = num_heads * head_dim; // total columns of weight matrix
+        let w_q = linear_b(emb_vec_size, d_k, bias, vb.pp("W_q"))?;
+        let w_k = linear_b(emb_vec_size, d_k, bias, vb.pp("W_k"))?;
+        let w_v = linear_b(emb_vec_size, d_k, bias, vb.pp("W_v"))?;
+
+        let scaling = 1. / (head_dim as f64).sqrt();
+
+        let dropout = Dropout::new(drop_p);
+
+        let out_proj = linear_b(emb_vec_size, d_k, true, vb.pp("O_p"))?;
+
+        let out = Self {
+            num_heads,
+            d_out: d_k,
+            dropout,
+            head_dim,
+            out_proj,
+            w_k,
+            w_q,
+            scaling,
+            w_v,
+        };
+
+        Ok(out)
+    }
+
+    pub fn get_mask(size: usize, device: &Device) -> candle_core::Result<Tensor> {
+        let mask: Vec<_> = (0..size)
+            .flat_map(|i| (0..size).map(move |j| u32::from(j > i)))
+            .collect();
+        let out = Tensor::from_slice(&mask, (size, size), device)?;
+        Ok(out)
+    }
+
+    pub fn masked_fill(
+        on_false: &Tensor,
+        mask: &Tensor,
+        on_true: f32,
+    ) -> candle_core::Result<Tensor> {
+        let shape = mask.shape();
+        let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+        let m = mask.where_cond(&on_true, on_false)?;
+        Ok(m)
+    }
+}
+
+impl ModuleT for MultiHeadAttention {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        let (num_batches, emb_vec_size, _) = xs.dims3()?;
+        let queries = self.w_q.forward_t(xs, train)?;
+        let keys = self.w_k.forward_t(xs, train)?;
+        let values = self.w_v.forward_t(xs, train)?;
+
+        // Now we unpack the matrix to create the attention heads
+        let queries =
+            queries.reshape((num_batches, emb_vec_size, self.num_heads, self.head_dim))?;
+        let keys = keys.reshape((num_batches, emb_vec_size, self.num_heads, self.head_dim))?;
+        let values = values.reshape((num_batches, emb_vec_size, self.num_heads, self.head_dim))?;
+
+        //we swap dimensions, to complete transformation into multi-heads, so that dimension is now (num_batches, num_heads, emb_vec_size, head_dim) (each had will have dimension (emb_vec_size, head_dim))
+        let queries = queries.transpose(1, 2)?;
+        let keys = keys.transpose(1, 2)?;
+        let values = values.transpose(1, 2)?;
+
+        //we apply the self-attention mechanism
+        let att_scores = queries.matmul(&keys.transpose(2, 3)?)?;
+
+        let mask = Self::get_mask(emb_vec_size, xs.device())?;
+        let masked = Self::masked_fill(
+            &att_scores,
+            &mask.broadcast_left((num_batches, self.num_heads))?,
+            f32::NEG_INFINITY,
+        )?;
+
+        let att_weights = softmax(&(masked * self.scaling)?, 3)?;
+
+        let att_weights = self.dropout.forward_t(&att_weights, train)?;
+
+        let ctx_vec = att_weights.matmul(&values)?;
+        let ctx_vec = ctx_vec.transpose(1, 2)?;
+
+        // we re-arrange the ctx vector as a single big matrix
+        let ctx_vec = ctx_vec
+            .reshape((num_batches, emb_vec_size, self.d_out))?
+            .contiguous()?;
+
+        //finally, we project the final ctx vector
+        self.out_proj.forward_t(&ctx_vec, train)
     }
 }
 
@@ -668,7 +781,7 @@ mod tests {
 
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
         let attentions = (0..h).map(|_| SelfAttentionV2::new(&vb, emb_cols, d_out, true));
-        let multi_head = attentions.collect::<Result<MultiHeadAttention<_>, _>>()?;
+        let multi_head = attentions.collect::<Result<MultiHeadAttentionWrapper<_>, _>>()?;
 
         let cont_matrices = multi_head.forward(&embeddings)?;
 

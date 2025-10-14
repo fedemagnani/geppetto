@@ -63,3 +63,5 @@ Before 2017, the **RNNs were the most popular encoder-decoder arhcitecture**:
   - The attention mechanism employed in each head can be causal (the matrix of attention weights will be masked) or not
   - The attention mechanism is run in parralel (one thread per head), 
   - We know that each head produces a matrix of context vectors (one context vector per input vector embedding), so a multi-headed attention with "h" heads produces a stack of **"h" context matrices**. These matrices are horizontally concatenated, so that if each context matrix has `d_out` columns, the resulting concatenated matrix will have `h * d_out` columns. The number of rows remain the same, equal to the number of input vector embeddings
+  - The smallet GPT2 has **12 attention heads** and **context vector embedding size of 768**
+  - The largest GPT-2 has **25 attention heads** and **context vector embedding size of 1600**
