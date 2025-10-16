@@ -1,10 +1,14 @@
 use core::f32;
+use std::f32::EPSILON;
+use std::f64;
 use std::{fs, path::Path};
 
 use candle_core::{D, Device, Tensor};
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
-use candle_nn::{Dropout, Linear, Module, ModuleT, VarBuilder, linear_b};
+use candle_nn::{
+    Dropout, Embedding, Linear, Module, ModuleT, Sequential, VarBuilder, embedding, linear_b, seq,
+};
 use tiktoken_rs::CoreBPE;
 
 pub struct SelfAttention<T> {
@@ -385,6 +389,176 @@ impl ModuleT for MultiHeadAttention {
 
         //finally, we project the final ctx vector
         self.out_proj.forward_t(&ctx_vec, train)
+    }
+}
+
+struct DummyTransformer;
+
+impl Module for DummyTransformer {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        Ok(xs.clone())
+    }
+}
+
+struct DummyGptConfig {
+    vocab_size: usize, // input of the embedding layer (number of rows of the embedding matrix) = number of token ids (as each token id maps to a row of the matrix)
+    emb_dim: usize, // columns of the embedding matrix: each token id is mapped to a vector having this dimensions
+    context_length: usize, //the max number of tokens processed together
+    drop_p: f32,    //dropout probability
+    num_trf: usize, //number of transformers invovled in the model
+    bias: bool,     // whether to add bias or not in the output module
+}
+
+struct DummyGPTModel {
+    tok_emb: Embedding,
+    pos_emb: Embedding,
+    drop_emb: Dropout,
+    trf_blocks: Sequential, // of transforers
+    final_norm: LayerNorm,
+    out_head: Linear,
+}
+
+impl DummyGPTModel {
+    pub fn new(vb: &VarBuilder, c: DummyGptConfig) -> candle_core::Result<Self> {
+        let tok_emb = embedding(c.vocab_size, c.emb_dim, vb.pp("tok_emb"))?;
+        let pos_emb = embedding(c.context_length, c.emb_dim, vb.pp("pos_emb"))?;
+        let drop_emb = Dropout::new(c.drop_p);
+        let mut trf_blocks = seq();
+        for _ in 0..c.num_trf {
+            trf_blocks = trf_blocks.add(DummyTransformer);
+        }
+        let final_norm = LayerNorm::new(vb, c.emb_dim)?;
+        let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
+        let out = Self {
+            tok_emb,
+            pos_emb,
+            drop_emb,
+            trf_blocks,
+            final_norm,
+            out_head,
+        };
+        Ok(out)
+    }
+}
+
+/// An implementation of the GELU activation function
+///
+/// A unit struct in order to implement `candle_core::Module` trait
+#[derive(Clone, Debug)]
+pub struct GELU;
+
+impl Module for GELU {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        (0.5_f64 * xs)?.mul(
+            &((2_f64 / f64::consts::PI).sqrt() * (xs + (xs.mul(xs)?.mul(xs)? * 0.044715f64)?)?)?
+                .tanh()?
+                .broadcast_add(&Tensor::ones((1,), candle_core::DType::F32, xs.device())?)?,
+        )
+    }
+}
+
+// Standardizes value computing its zeta scores
+// scale and shift are like mu and signa when mapping a generic standard gaussian into a gaussian
+// These values are learnt during training, to find the optimal mu and sigma fitting data
+struct LayerNorm {
+    scale: Tensor,
+    shift: Tensor,
+}
+
+impl LayerNorm {
+    pub fn new(vb: &VarBuilder, emb_dim: usize) -> candle_core::Result<Self> {
+        //we start with parameters
+        let scale = vb.get_with_hints(emb_dim, "layer_scale", candle_nn::Init::Const(1.))?;
+        let shift = vb.get_with_hints(emb_dim, "layer_shift", candle_nn::Init::Const(0.))?;
+        let out = Self { scale, shift };
+        Ok(out)
+    }
+}
+
+impl Module for LayerNorm {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        // mean and var iterating over cols
+        let mean = xs.mean_keepdim(D::Minus1)?;
+        let var = xs.var_keepdim(D::Minus1)?;
+        let num = xs.broadcast_sub(&mean)?;
+        let den = var.broadcast_add(&Tensor::new(&[EPSILON], xs.device())?)?;
+        let den = den.sqrt()?;
+        //(x-mu)/sigma
+        let std_gaus = num.broadcast_div(&den)?;
+        self.scale
+            .broadcast_add(&self.shift.broadcast_mul(&std_gaus)?)
+    }
+}
+
+struct FeedForward(Sequential);
+impl FeedForward {
+    pub fn new(vb: &VarBuilder, emb_size: usize, bias: bool) -> candle_core::Result<Self> {
+        let out = seq();
+        let linear_1 = linear_b(emb_size, 4 * emb_size, bias, vb.pp("ff_linear_1"))?;
+        let out = out.add(linear_1);
+        let out = out.add(GELU);
+        let linear_2 = linear_b(4 * emb_size, emb_size, bias, vb.pp("ff_linear_2"))?;
+        let out = out.add(linear_2);
+
+        Ok(Self(out))
+    }
+}
+
+impl Module for FeedForward {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        self.0.forward(xs)
+    }
+}
+
+struct TransformerBlock {
+    norm_1: LayerNorm,
+    multi_head: MultiHeadAttention,
+    norm_2: LayerNorm,
+    feed_forward: FeedForward,
+
+    dropout: Dropout,
+}
+
+impl TransformerBlock {
+    pub fn new(
+        vb: &VarBuilder,
+        num_heads: usize,
+        emb_dim: usize,
+        bias: bool,
+        drop_p: f32,
+    ) -> candle_core::Result<Self> {
+        let norm_1 = LayerNorm::new(vb, emb_dim)?;
+        let multi_head =
+            MultiHeadAttention::new(vb, num_heads, emb_dim, emb_dim / num_heads, bias, drop_p)?;
+        let norm_2 = LayerNorm::new(vb, emb_dim)?;
+        let feed_forward = FeedForward::new(vb, emb_dim, bias)?;
+        let dropout = Dropout::new(drop_p);
+        let out = Self {
+            norm_1,
+            multi_head,
+            norm_2,
+            feed_forward,
+            dropout,
+        };
+        Ok(out)
+    }
+}
+
+impl ModuleT for TransformerBlock {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        let shortcut_1 = xs;
+        let x = self.norm_1.forward_t(xs, train)?;
+        let x = self.multi_head.forward_t(&x, train)?;
+        let x = self.dropout.forward_t(&x, train)?;
+
+        let x = (x + shortcut_1)?; // shortcut connection
+
+        let shortcut_2 = &x;
+        let x = self.norm_2.forward_t(&x, train)?;
+        let x = self.feed_forward.forward_t(&x, train)?;
+        let x = self.dropout.forward_t(&x, train)?;
+
+        x + shortcut_2 // shortcut connection
     }
 }
 
@@ -788,6 +962,34 @@ mod tests {
         debug_assert_eq!(cont_matrices.dims()[0], num_batches);
         debug_assert_eq!(cont_matrices.dims()[1], emb_rows);
         debug_assert_eq!(cont_matrices.dims()[2], h * d_out);
+        Ok(())
+    }
+
+    #[test]
+    fn transformer_block() -> eyre::Result<()> {
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let num_heads = 4;
+        let emb_dim = 768;
+        let bias = false;
+        let drop_p = 0.2;
+        let trans = TransformerBlock::new(&vb, num_heads, emb_dim, bias, drop_p)?;
+
+        let num_tokens_per_group = 4;
+
+        let groups = 1;
+
+        let xs = vb.get_with_hints(
+            (groups, num_tokens_per_group, emb_dim),
+            "embeddings",
+            DEFAULT_KAIMING_NORMAL,
+        )?;
+
+        let out = trans.forward_t(&xs, false)?;
+
+        debug_assert_eq!(out.dims()[0], groups);
+        debug_assert_eq!(out.dims()[1], num_tokens_per_group);
+        debug_assert_eq!(out.dims()[2], emb_dim);
+
         Ok(())
     }
 }
