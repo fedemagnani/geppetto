@@ -726,10 +726,10 @@ impl Default for CrossEntropy {
 }
 
 impl CrossEntropy {
-    pub fn compute(&self, model: &GPTModel, data: Dataset) -> eyre::Result<f32> {
+    pub fn compute(&self, model: &GPTModel, data: Dataset, batch_size: usize) -> eyre::Result<f32> {
         let mut total_loss = 0.;
         let mut count = 0;
-        for batch in data.batches(1) {
+        for batch in data.batches(batch_size) {
             let (input_batch, target_batch) = batch?;
 
             let loss = self.compute_single(model, &input_batch, &target_batch)?;
@@ -1697,7 +1697,7 @@ mod tests {
         debug_assert!(loss > 0.);
 
         let data = Dataset::new(inputs, targets);
-        let loss2 = c_entropy.compute(&model, data)?;
+        let loss2 = c_entropy.compute(&model, data, 1)?;
         debug_assert!((loss - loss2).abs() < 1e-5);
 
         Ok(())
