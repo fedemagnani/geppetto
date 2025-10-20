@@ -6,9 +6,7 @@ use std::{fs, path::Path};
 use candle_core::{D, Device, IndexOp, Tensor};
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
-use candle_nn::{
-    Dropout, Embedding, Linear, Module, ModuleT, Sequential, VarBuilder, embedding, linear_b, seq,
-};
+use candle_nn::{Dropout, Embedding, Linear, ModuleT, VarBuilder, embedding, linear_b};
 use eyre::eyre;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
@@ -87,7 +85,7 @@ pub struct SelfAttention<T> {
     scaling: f64,
 }
 
-pub trait AttentionLayer: Module {}
+pub trait AttentionLayer: ModuleT {}
 
 type SelfAttentionV1 = SelfAttention<Tensor>;
 impl AttentionLayer for SelfAttentionV1 {}
@@ -113,12 +111,12 @@ impl<L: AttentionLayer> FromIterator<L> for MultiHeadAttentionWrapper<L> {
     }
 }
 
-impl<L: AttentionLayer> Module for MultiHeadAttentionWrapper<L> {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+impl<L: AttentionLayer> ModuleT for MultiHeadAttentionWrapper<L> {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
         let ctx_matrices = self
             .0
             .iter()
-            .map(|l| l.forward(xs))
+            .map(|l| l.forward_t(xs, train))
             .collect::<Result<Vec<_>, _>>()?;
 
         // Last dimenion = column = D::Minus1
@@ -175,8 +173,8 @@ impl SelfAttentionV1 {
     }
 }
 
-impl Module for SelfAttentionV1 {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+impl ModuleT for SelfAttentionV1 {
+    fn forward_t(&self, xs: &Tensor, _: bool) -> candle_core::Result<Tensor> {
         self.context_vectors(xs)
     }
 }
@@ -195,22 +193,30 @@ impl SelfAttentionV2 {
         Ok(out)
     }
 
-    pub fn attention_scores(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
-        let queries = self.w_q.forward(embeddings)?;
-        let keys = self.w_k.forward(embeddings)?;
+    pub fn attention_scores(
+        &self,
+        embeddings: &Tensor,
+        train: bool,
+    ) -> candle_core::Result<Tensor> {
+        let queries = self.w_q.forward_t(embeddings, train)?;
+        let keys = self.w_k.forward_t(embeddings, train)?;
         let att_scores = queries.matmul(&keys.t()?)?;
         Ok(att_scores)
     }
 
-    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
-        let att_scores = self.attention_scores(embeddings)?;
+    pub fn attention_weights(
+        &self,
+        embeddings: &Tensor,
+        train: bool,
+    ) -> candle_core::Result<Tensor> {
+        let att_scores = self.attention_scores(embeddings, train)?;
         let att_weights = softmax(&(att_scores * self.scaling)?, 1)?;
         Ok(att_weights)
     }
 
-    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
-        let att_weights = self.attention_weights(embeddings)?;
-        let values = self.w_v.forward(embeddings)?;
+    pub fn context_vectors(&self, embeddings: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        let att_weights = self.attention_weights(embeddings, train)?;
+        let values = self.w_v.forward_t(embeddings, train)?;
         let out = att_weights.matmul(&values)?;
         Ok(out)
     }
@@ -227,9 +233,9 @@ impl SelfAttentionV2 {
     }
 }
 
-impl Module for SelfAttentionV2 {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
-        self.context_vectors(xs)
+impl ModuleT for SelfAttentionV2 {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        self.context_vectors(xs, train)
     }
 }
 
@@ -274,9 +280,13 @@ impl CausalAttentionV2 {
         Self { attention, dropout }
     }
 
-    pub fn attention_weights(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn attention_weights(
+        &self,
+        embeddings: &Tensor,
+        train: bool,
+    ) -> candle_core::Result<Tensor> {
         let (batches, num_tokens, _) = embeddings.dims3()?;
-        let att_scores = self.attention.attention_scores(embeddings)?;
+        let att_scores = self.attention.attention_scores(embeddings, train)?;
 
         let mask = Self::get_mask(num_tokens, embeddings.device())?;
         let masked = Self::masked_fill(
@@ -288,22 +298,22 @@ impl CausalAttentionV2 {
         // scale
         let mut att_weights = softmax(&(masked * self.attention.scaling)?, D::Minus1)?;
         // dropout
-        att_weights = self.dropout.forward(&att_weights, true).unwrap();
+        att_weights = self.dropout.forward_t(&att_weights, train).unwrap();
 
         Ok(att_weights)
     }
 
-    pub fn context_vectors(&self, embeddings: &Tensor) -> candle_core::Result<Tensor> {
-        let att_weights = self.attention_weights(embeddings)?;
-        let values = self.attention.w_v.forward(embeddings)?;
+    pub fn context_vectors(&self, embeddings: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        let att_weights = self.attention_weights(embeddings, train)?;
+        let values = self.attention.w_v.forward_t(embeddings, train)?;
         let out = att_weights.matmul(&values)?;
         Ok(out)
     }
 }
 
-impl Module for CausalAttentionV2 {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
-        self.context_vectors(xs)
+impl ModuleT for CausalAttentionV2 {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        self.context_vectors(xs, train)
     }
 }
 pub struct Dataset {
@@ -508,7 +518,7 @@ pub struct GPTModel {
     pub tok_emb: Embedding,
     pub pos_emb: Embedding,
     pub drop_emb: Dropout,
-    pub trf_blocks: Sequential, // of transforers
+    pub trf_blocks: Vec<TransformerBlock>,
     pub final_norm: LayerNorm,
     pub out_head: Linear,
 }
@@ -518,9 +528,9 @@ impl GPTModel {
         let tok_emb = embedding(c.vocab_size, c.emb_dim, vb.pp("tok_emb"))?;
         let pos_emb = embedding(c.context_length, c.emb_dim, vb.pp("pos_emb"))?;
         let drop_emb = Dropout::new(c.drop_p);
-        let mut trf_blocks = seq();
+        let mut trf_blocks = Vec::with_capacity(c.num_trf);
         for _ in 0..c.num_trf {
-            trf_blocks = trf_blocks.add(TransformerBlock::from_config(vb, c)?)
+            trf_blocks.push(TransformerBlock::from_config(vb, c)?)
         }
         let final_norm = LayerNorm::new(vb, c.emb_dim)?;
         let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
@@ -565,19 +575,23 @@ impl GPTModel {
     }
 }
 
-impl Module for GPTModel {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+impl ModuleT for GPTModel {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
         let (_, seq_len) = xs.dims2()?;
-        let tok_emb = self.tok_emb.forward(xs)?;
+        let tok_emb = self.tok_emb.forward_t(xs, train)?;
 
         let pos_ids = Tensor::arange(0u32, seq_len as u32, xs.device())?;
         let pos_emb = self.pos_emb.embeddings().index_select(&pos_ids, 0)?;
 
         let x = tok_emb.broadcast_add(&pos_emb)?;
-        let x = self.drop_emb.forward(&x, false)?;
-        let x = self.trf_blocks.forward(&x)?;
-        let x = self.final_norm.forward(&x)?;
-        let logits = self.out_head.forward(&x)?;
+        let mut x = self.drop_emb.forward_t(&x, train)?;
+
+        for t in &self.trf_blocks {
+            x = t.forward_t(&x, train)?;
+        }
+
+        let x = self.final_norm.forward_t(&x, train)?;
+        let logits = self.out_head.forward_t(&x, train)?;
         Ok(logits)
     }
 }
@@ -588,8 +602,8 @@ impl Module for GPTModel {
 #[derive(Clone, Debug)]
 pub struct GELU;
 
-impl Module for GELU {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+impl ModuleT for GELU {
+    fn forward_t(&self, xs: &Tensor, _: bool) -> candle_core::Result<Tensor> {
         (0.5_f64 * xs)?.mul(
             &((2_f64 / f64::consts::PI).sqrt() * (xs + (xs.mul(xs)?.mul(xs)? * 0.044715f64)?)?)?
                 .tanh()?
@@ -616,8 +630,8 @@ impl LayerNorm {
     }
 }
 
-impl Module for LayerNorm {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+impl ModuleT for LayerNorm {
+    fn forward_t(&self, xs: &Tensor, _: bool) -> candle_core::Result<Tensor> {
         // mean and var iterating over cols
         let mean = xs.mean_keepdim(D::Minus1)?;
         let var = xs.var_keepdim(D::Minus1)?;
@@ -631,27 +645,35 @@ impl Module for LayerNorm {
     }
 }
 
-struct FeedForward(Sequential);
+struct FeedForward {
+    linear_1: Linear,
+    gelu: GELU,
+    linear_2: Linear,
+}
 impl FeedForward {
     pub fn new(vb: &VarBuilder, emb_size: usize, bias: bool) -> candle_core::Result<Self> {
-        let out = seq();
         let linear_1 = linear_b(emb_size, 4 * emb_size, bias, vb.pp("ff_linear_1"))?;
-        let out = out.add(linear_1);
-        let out = out.add(GELU);
         let linear_2 = linear_b(4 * emb_size, emb_size, bias, vb.pp("ff_linear_2"))?;
-        let out = out.add(linear_2);
 
-        Ok(Self(out))
+        let out = Self {
+            linear_1,
+            linear_2,
+            gelu: GELU,
+        };
+        Ok(out)
     }
 }
 
-impl Module for FeedForward {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
-        self.0.forward(xs)
+impl ModuleT for FeedForward {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+        let xs = self.linear_1.forward_t(xs, train)?;
+        let xs = self.gelu.forward_t(&xs, train)?;
+        let xs = self.linear_2.forward_t(&xs, train)?;
+        Ok(xs)
     }
 }
 
-struct TransformerBlock {
+pub struct TransformerBlock {
     norm_1: LayerNorm,
     multi_head: MultiHeadAttention,
     norm_2: LayerNorm,
@@ -689,19 +711,19 @@ impl TransformerBlock {
     }
 }
 
-impl Module for TransformerBlock {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+impl ModuleT for TransformerBlock {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
         let shortcut_1 = xs;
-        let x = self.norm_1.forward(xs)?;
-        let x = self.multi_head.forward_t(&x, false)?;
-        let x = self.dropout.forward(&x, false)?;
+        let x = self.norm_1.forward_t(xs, train)?;
+        let x = self.multi_head.forward_t(&x, train)?;
+        let x = self.dropout.forward_t(&x, train)?;
 
         let x = (x + shortcut_1)?; // shortcut connection
 
         let shortcut_2 = &x;
-        let x = self.norm_2.forward(&x)?;
-        let x = self.feed_forward.forward(&x)?;
-        let x = self.dropout.forward(&x, false)?;
+        let x = self.norm_2.forward_t(&x, train)?;
+        let x = self.feed_forward.forward_t(&x, train)?;
+        let x = self.dropout.forward_t(&x, train)?;
 
         x + shortcut_2 // shortcut connection
     }
@@ -718,7 +740,7 @@ impl Default for CrossEntropy {
     fn default() -> Self {
         Self {
             device: Device::Cpu,
-            train: true,
+            train: false,
             ignore_index: None,
             num_batches: None,
         }
@@ -1040,7 +1062,7 @@ mod tests {
 
         let input_length = 10_usize;
         let xs = Tensor::rand(0f32, 1f32, (input_length, d_in), &Device::Cpu)?;
-        let context_vectors = attn_v2_layer.forward(&xs)?;
+        let context_vectors = attn_v2_layer.forward_t(&xs, false)?;
 
         assert_eq!(context_vectors.dims(), &[input_length, d_out]);
         Ok(())
@@ -1066,7 +1088,7 @@ mod tests {
         let input_length = 10_usize;
         let xs = Tensor::rand(0f32, 1f32, (input_length, d_in), &Device::Cpu)?;
         let batch = Tensor::stack(&[&xs, &xs], 0)?;
-        let context_vectors = causal.forward(&batch)?;
+        let context_vectors = causal.forward_t(&batch, false)?;
 
         assert_eq!(context_vectors.dims(), &[2_usize, input_length, d_out]);
         Ok(())
@@ -1100,7 +1122,7 @@ mod tests {
 
         let model = GPTModel::new(&vb(), &cfg)?;
 
-        let logits = model.forward(&batch_token_ids)?;
+        let logits = model.forward_t(&batch_token_ids, false)?;
 
         assert_eq!(logits.dims(), &[batch_size, seq_len, cfg.vocab_size]);
         Ok(())
@@ -1124,7 +1146,7 @@ mod tests {
         let batch_example = Tensor::rand(0f32, 1f32, (batch_size, cfg.emb_dim), &Device::Cpu)?;
         let layer_norm = LayerNorm::new(&vb(), cfg.emb_dim)?;
 
-        let out_norm = layer_norm.forward(&batch_example)?;
+        let out_norm = layer_norm.forward_t(&batch_example, false)?;
         let mean = out_norm.mean_keepdim(D::Minus1)?;
         let var = out_norm.var_keepdim(D::Minus1)?;
 
@@ -1158,11 +1180,11 @@ mod tests {
 
         // testing manual impl
         let gelu = GELU;
-        let out = gelu.forward(&batch_example)?;
+        let out = gelu.forward_t(&batch_example, false)?;
 
         // reference impl
         let candle_gelu = Activation::Gelu;
-        let candle_out = candle_gelu.forward(&batch_example)?;
+        let candle_out = candle_gelu.forward_t(&batch_example, false)?;
 
         // assert equality
         let tol: f64 = 1e-3;
@@ -1183,7 +1205,7 @@ mod tests {
         let (batch_size, seq_len) = (2_usize, 3_usize);
         let batch_example =
             Tensor::rand(0f32, 1f32, (batch_size, seq_len, cfg.emb_dim), &Device::Cpu)?;
-        let out = ff.forward(&batch_example)?;
+        let out = ff.forward_t(&batch_example, false)?;
 
         assert_eq!(out.dims(), &[batch_size, seq_len, cfg.emb_dim]);
         Ok(())
@@ -1301,8 +1323,8 @@ mod tests {
         );
         att_lay_1.scaling = att_lay_2.scaling;
 
-        let ctx2 = att_lay_2.forward(&embeddings)?;
-        let ctx1 = att_lay_1.forward(&embeddings)?;
+        let ctx2 = att_lay_2.forward_t(&embeddings, true)?;
+        let ctx1 = att_lay_1.forward_t(&embeddings, true)?;
 
         let ctx2_vec = ctx2.to_vec2::<f32>()?;
         let ctx1_vec = ctx1.to_vec2::<f32>()?;
@@ -1441,7 +1463,7 @@ mod tests {
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, embeddings.device());
         let att_layer = CausalAttentionV2::new(&vb, emb_col, d_k, true, 0.5)?;
 
-        let ctx_mat = att_layer.forward(&embeddings)?;
+        let ctx_mat = att_layer.forward_t(&embeddings, false)?;
 
         debug_assert_eq!(ctx_mat.dims()[0], num_batches);
         debug_assert_eq!(ctx_mat.dims()[1], emb_row);
@@ -1466,7 +1488,7 @@ mod tests {
         let attentions = (0..h).map(|_| SelfAttentionV2::new(&vb, emb_cols, d_out, true));
         let multi_head = attentions.collect::<Result<MultiHeadAttentionWrapper<_>, _>>()?;
 
-        let cont_matrices = multi_head.forward(&embeddings)?;
+        let cont_matrices = multi_head.forward_t(&embeddings, false)?;
 
         debug_assert_eq!(cont_matrices.dims()[0], num_batches);
         debug_assert_eq!(cont_matrices.dims()[1], emb_rows);
@@ -1555,7 +1577,6 @@ mod tests {
             transformer_block.multi_head.head_dim,
             cfg.emb_dim / cfg.num_heads
         );
-        assert_eq!(transformer_block.feed_forward.0.len(), 3);
         assert_eq!(transformer_block.norm_1.scale.dims(), &[cfg.emb_dim]);
         assert_eq!(transformer_block.norm_2.shift.dims(), &[cfg.emb_dim]);
         Ok(())
@@ -1576,7 +1597,7 @@ mod tests {
             vb.device(),
         )?;
 
-        let out = transformer_block.forward(&batch_example)?;
+        let out = transformer_block.forward_t(&batch_example, false)?;
         assert_eq!(out.dims(), batch_example.dims());
         Ok(())
     }
@@ -1609,7 +1630,7 @@ mod tests {
 
         let model = GPTModel::new(&vb(), &cfg)?;
 
-        let logits = model.forward(&batch_token_ids)?;
+        let logits = model.forward_t(&batch_token_ids, false)?;
 
         assert_eq!(logits.dims(), &[batch_size, seq_len, cfg.vocab_size]);
         Ok(())
@@ -1630,7 +1651,7 @@ mod tests {
         let xs = Tensor::rand(0f32, vocab_size as f32, (batch_size, seq_len), &Device::Cpu)?
             .to_dtype(DType::U32)?;
 
-        let _ = gpt.forward(&xs)?;
+        let _ = gpt.forward_t(&xs, false)?;
 
         Ok(())
     }
@@ -1667,7 +1688,7 @@ mod tests {
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
         let model = GPTModel::new(&vb, &gpt_config())?;
 
-        let logits = model.forward(&tokens)?;
+        let logits = model.forward_t(&tokens, true)?;
 
         let (_, c, _) = logits.dims3()?;
         // Pick last column and return the position of the highest logit
@@ -1738,7 +1759,7 @@ mod tests {
         let inputs = Tensor::new(&[[16833_u32, 3626, 6100], [40, 1107, 588]], vb.device())?;
         let targets = Tensor::new(&[[3626_u32, 6100, 345], [1107, 588, 11311]], vb.device())?;
 
-        let logits = model.forward(&inputs)?;
+        let logits = model.forward_t(&inputs, false)?;
         let probas = softmax(&logits, D::Minus1)?;
 
         let predicted = probas.argmax_keepdim(D::Minus1)?; //token ids
