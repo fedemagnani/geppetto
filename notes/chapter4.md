@@ -28,5 +28,6 @@
     - This high dimensional data is evaluated by GeLu (or other) activation function
     - Another Linear layer maps back the output in the original shape of vector embeddings
     - The role of the **FeedForward** layer is to **modify data individually in each position** 
-  
-Notice that the original vecotr embeddings are added to the intermediate result after the first dropout layer (after that we surpassed the multi-head attention module). Likewise, the input of the sacond layer norm is added to the final output (after the second dropout, after the FeedForward). This shortuct connection machanism mitigates the vanishing gradient problem
+  - Notice that the original vector embeddings are added to the intermediate result after the first dropout layer (after that we surpassed the multi-head attention module). Likewise, the input of the sacond layer norm is added to the final output (after the second dropout, after the FeedForward). This shortuct connection machanism mitigates the vanishing gradient problem
+  - The output of a transformer block is the same of the input. However the input has been "trasnformed" indeed via the contextual information encoded via the multi-head attention modules and feedforward modules
+

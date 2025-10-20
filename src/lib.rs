@@ -1,15 +1,84 @@
 use core::f32;
-use std::f32::EPSILON;
+use std::collections::HashSet;
 use std::f64;
 use std::{fs, path::Path};
 
-use candle_core::{D, Device, Tensor};
+use candle_core::{D, Device, IndexOp, Tensor};
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
 use candle_nn::{
     Dropout, Embedding, Linear, Module, ModuleT, Sequential, VarBuilder, embedding, linear_b, seq,
 };
+use eyre::eyre;
+use rand::distr::Distribution;
+use rand::distr::weighted::WeightedIndex;
+use rand::rngs::ThreadRng;
 use tiktoken_rs::CoreBPE;
+
+/// Trait for returning top-k elements of a Tensor
+pub trait TopK {
+    /// Returns a `Tensor`'s top-k elements and its positions along dim 0
+    fn topk_last_dim0(&self, top_k: usize) -> candle_core::Result<(Tensor, Tensor)>;
+
+    /// Returns a `Tensor`'s top-k elements and its positions along dim 1
+    fn topk_last_dim1(&self, top_k: usize) -> candle_core::Result<(Tensor, Tensor)>;
+}
+
+impl TopK for Tensor {
+    fn topk_last_dim0(&self, top_k: usize) -> candle_core::Result<(Tensor, Tensor)> {
+        let top_pos = self.arg_sort_last_dim(false)?;
+        let top_pos = top_pos.i(..top_k)?;
+        let top_els = self.i(top_pos.to_vec1::<u32>()?)?;
+        Ok((top_els, top_pos))
+    }
+
+    fn topk_last_dim1(&self, top_k: usize) -> candle_core::Result<(Tensor, Tensor)> {
+        // get CUDA error sometimes when using `.arg_sort_last_dim`
+        // moving to CPU to carry out the op
+        let top_pos = self.to_device(&Device::Cpu)?.arg_sort_last_dim(false)?;
+        let top_pos = top_pos.to_device(&Device::cuda_if_available(0)?)?;
+        let (batch_size, vocab_size) = top_pos.dims2()?;
+        let top_pos = top_pos.i((.., ..top_k))?.flatten_all()?;
+
+        // get appropriate sum starting index
+        let aux = Tensor::arange(0u32, batch_size as u32, self.device())?;
+        let aux = (vocab_size as f64 * aux.broadcast_left(top_k)?.t()?.flatten_all()?)?;
+        let top_pos = (top_pos + &aux)?;
+        let top_els = self.flatten_all()?.i(top_pos.to_vec1::<u32>()?)?;
+
+        // reshape
+        let top_els = top_els.reshape((batch_size, top_k))?;
+        let top_pos = (top_pos - &aux)?;
+        let top_pos = top_pos.reshape((batch_size, top_k))?;
+        Ok((top_els, top_pos))
+    }
+}
+
+pub struct Tokenizer(CoreBPE);
+impl From<CoreBPE> for Tokenizer {
+    fn from(value: CoreBPE) -> Self {
+        Self(value)
+    }
+}
+
+impl Tokenizer {
+    pub fn text_to_token_ids(&self, text: &str, dev: &Device) -> candle_core::Result<Tensor> {
+        let allowed_special = HashSet::from(["<|endoftext|>"]);
+        let encoded = self.0.encode(text, allowed_special);
+        let num_tokens = encoded.len();
+        // encoded tensor
+        Tensor::from_vec(encoded, (1_usize, num_tokens), dev)
+    }
+
+    pub fn token_ids_to_text(&self, token_ids: &Tensor) -> eyre::Result<String> {
+        let flat = token_ids.squeeze(0)?;
+        let out = self
+            .0
+            .decode(flat.to_vec1::<u32>()?)
+            .map_err(|e| eyre!(e))?;
+        Ok(out)
+    }
+}
 
 pub struct SelfAttention<T> {
     w_q: T,
@@ -238,16 +307,35 @@ impl Module for CausalAttentionV2 {
     }
 }
 pub struct Dataset {
-    inputs: Vec<Vec<u32>>,
-    targets: Vec<Vec<u32>>,
+    inputs: Tensor,
+    targets: Tensor,
 }
 
 impl Dataset {
-    pub fn new(inputs: Vec<Vec<u32>>, targets: Vec<Vec<u32>>) -> Self {
+    pub fn new(inputs: Tensor, targets: Tensor) -> Self {
         Self { inputs, targets }
     }
 
-    pub fn from_path<P: AsRef<Path>>(path: P, tokenizer: CoreBPE) -> eyre::Result<Dataset> {
+    pub fn from_vec(
+        inputs: Vec<Vec<u32>>,
+        targets: Vec<Vec<u32>>,
+        device: &Device,
+    ) -> candle_core::Result<Self> {
+        let n = inputs.len();
+        let emb_dim = inputs[0].len();
+        let inputs = inputs.into_iter().flatten();
+        let targets = targets.into_iter().flatten();
+        let inputs = Tensor::from_iter(inputs, device)?.reshape((n, emb_dim))?;
+        let targets = Tensor::from_iter(targets, device)?.reshape((n, emb_dim))?;
+
+        Ok(Self { inputs, targets })
+    }
+
+    pub fn from_path<P: AsRef<Path>>(
+        path: P,
+        tokenizer: CoreBPE,
+        device: &Device,
+    ) -> eyre::Result<Dataset> {
         let values = fs::read_to_string(path)?;
 
         //map the whole text in tokenids
@@ -268,15 +356,29 @@ impl Dataset {
             targets.push(target);
         }
 
-        Ok(Self::new(inputs, targets))
+        Ok(Self::from_vec(inputs, targets, device)?)
     }
 
-    pub fn inputs(&self) -> &[Vec<u32>] {
+    pub fn inputs(&self) -> &Tensor {
         &self.inputs
     }
 
-    pub fn targets(&self) -> &[Vec<u32>] {
+    pub fn targets(&self) -> &Tensor {
         &self.targets
+    }
+
+    pub fn batches(
+        &self,
+        batch_size: usize,
+    ) -> impl Iterator<Item = candle_core::Result<(Tensor, Tensor)>> {
+        let n = self.inputs.dims()[0];
+        (0..n).step_by(batch_size).map(move |start| {
+            let end = (start + batch_size).min(n);
+            Ok((
+                self.inputs.narrow(0, start, end - start)?,
+                self.targets.narrow(0, start, end - start)?,
+            ))
+        })
     }
 }
 
@@ -310,7 +412,7 @@ impl MultiHeadAttention {
 
         let dropout = Dropout::new(drop_p);
 
-        let out_proj = linear_b(emb_vec_size, d_k, true, vb.pp("O_p"))?;
+        let out_proj = linear_b(d_k, d_k, true, vb.pp("O_p"))?;
 
         let out = Self {
             num_heads,
@@ -361,9 +463,9 @@ impl ModuleT for MultiHeadAttention {
         let values = values.reshape((num_batches, emb_vec_size, self.num_heads, self.head_dim))?;
 
         //we swap dimensions, to complete transformation into multi-heads, so that dimension is now (num_batches, num_heads, emb_vec_size, head_dim) (each had will have dimension (emb_vec_size, head_dim))
-        let queries = queries.transpose(1, 2)?;
-        let keys = keys.transpose(1, 2)?;
-        let values = values.transpose(1, 2)?;
+        let queries = queries.transpose(1, 2)?.contiguous()?;
+        let keys = keys.transpose(1, 2)?.contiguous()?;
+        let values = values.transpose(1, 2)?.contiguous()?;
 
         //we apply the self-attention mechanism
         let att_scores = queries.matmul(&keys.transpose(2, 3)?)?;
@@ -392,40 +494,33 @@ impl ModuleT for MultiHeadAttention {
     }
 }
 
-struct DummyTransformer;
-
-impl Module for DummyTransformer {
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
-        Ok(xs.clone())
-    }
+pub struct GptConfig {
+    pub vocab_size: usize, // input of the embedding layer (number of rows of the embedding matrix) = number of token ids (as each token id maps to a row of the matrix)
+    pub emb_dim: usize, // columns of the embedding matrix: each token id is mapped to a vector having this dimensions
+    pub context_length: usize, //the max number of tokens processed together
+    pub drop_p: f32,    //dropout probability
+    pub num_trf: usize, //number of transformers invovled in the model
+    pub num_heads: usize, //number of heads of multi-head attention module in transformer block
+    pub bias: bool,     // whether to add bias or not in the output module
 }
 
-struct DummyGptConfig {
-    vocab_size: usize, // input of the embedding layer (number of rows of the embedding matrix) = number of token ids (as each token id maps to a row of the matrix)
-    emb_dim: usize, // columns of the embedding matrix: each token id is mapped to a vector having this dimensions
-    context_length: usize, //the max number of tokens processed together
-    drop_p: f32,    //dropout probability
-    num_trf: usize, //number of transformers invovled in the model
-    bias: bool,     // whether to add bias or not in the output module
+pub struct GPTModel {
+    pub tok_emb: Embedding,
+    pub pos_emb: Embedding,
+    pub drop_emb: Dropout,
+    pub trf_blocks: Sequential, // of transforers
+    pub final_norm: LayerNorm,
+    pub out_head: Linear,
 }
 
-struct DummyGPTModel {
-    tok_emb: Embedding,
-    pos_emb: Embedding,
-    drop_emb: Dropout,
-    trf_blocks: Sequential, // of transforers
-    final_norm: LayerNorm,
-    out_head: Linear,
-}
-
-impl DummyGPTModel {
-    pub fn new(vb: &VarBuilder, c: DummyGptConfig) -> candle_core::Result<Self> {
+impl GPTModel {
+    pub fn new(vb: &VarBuilder, c: &GptConfig) -> candle_core::Result<Self> {
         let tok_emb = embedding(c.vocab_size, c.emb_dim, vb.pp("tok_emb"))?;
         let pos_emb = embedding(c.context_length, c.emb_dim, vb.pp("pos_emb"))?;
         let drop_emb = Dropout::new(c.drop_p);
         let mut trf_blocks = seq();
         for _ in 0..c.num_trf {
-            trf_blocks = trf_blocks.add(DummyTransformer);
+            trf_blocks = trf_blocks.add(TransformerBlock::from_config(vb, c)?)
         }
         let final_norm = LayerNorm::new(vb, c.emb_dim)?;
         let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
@@ -438,6 +533,52 @@ impl DummyGPTModel {
             out_head,
         };
         Ok(out)
+    }
+
+    pub fn generate_text_simple(
+        &self,
+        mut idx: Tensor,
+        max_new_tokens: usize,
+        context_size: usize,
+    ) -> candle_core::Result<Tensor> {
+        for _ in 0..max_new_tokens {
+            // Limit the context window
+            let (_b, seq_len) = idx.dims2()?;
+            let start = seq_len.saturating_sub(context_size);
+            let idx_cond = idx.i((.., start..seq_len))?;
+
+            // Forward pass
+            let logits = self.forward_t(&idx_cond, false)?;
+
+            // Get last logits
+            let (_b, c, _vocab_size) = logits.dims3()?;
+            let logits = logits.i((.., c - 1, ..))?;
+
+            // Greedy sampling
+            let probas = softmax(&logits, 1)?;
+            let idx_next = probas.argmax_keepdim(D::Minus1)?;
+
+            // Append new token
+            idx = Tensor::cat(&[&idx, &idx_next], D::Minus1)?;
+        }
+        Ok(idx)
+    }
+}
+
+impl Module for GPTModel {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        let (_, seq_len) = xs.dims2()?;
+        let tok_emb = self.tok_emb.forward(xs)?;
+
+        let pos_ids = Tensor::arange(0u32, seq_len as u32, xs.device())?;
+        let pos_emb = self.pos_emb.embeddings().index_select(&pos_ids, 0)?;
+
+        let x = tok_emb.broadcast_add(&pos_emb)?;
+        let x = self.drop_emb.forward(&x, false)?;
+        let x = self.trf_blocks.forward(&x)?;
+        let x = self.final_norm.forward(&x)?;
+        let logits = self.out_head.forward(&x)?;
+        Ok(logits)
     }
 }
 
@@ -460,7 +601,7 @@ impl Module for GELU {
 // Standardizes value computing its zeta scores
 // scale and shift are like mu and signa when mapping a generic standard gaussian into a gaussian
 // These values are learnt during training, to find the optimal mu and sigma fitting data
-struct LayerNorm {
+pub struct LayerNorm {
     scale: Tensor,
     shift: Tensor,
 }
@@ -481,12 +622,12 @@ impl Module for LayerNorm {
         let mean = xs.mean_keepdim(D::Minus1)?;
         let var = xs.var_keepdim(D::Minus1)?;
         let num = xs.broadcast_sub(&mean)?;
-        let den = var.broadcast_add(&Tensor::new(&[EPSILON], xs.device())?)?;
+        let den = var.broadcast_add(&Tensor::new(&[f32::EPSILON], xs.device())?)?;
         let den = den.sqrt()?;
         //(x-mu)/sigma
         let std_gaus = num.broadcast_div(&den)?;
-        self.scale
-            .broadcast_add(&self.shift.broadcast_mul(&std_gaus)?)
+        self.shift
+            .broadcast_add(&self.scale.broadcast_mul(&std_gaus)?)
     }
 }
 
@@ -542,23 +683,208 @@ impl TransformerBlock {
         };
         Ok(out)
     }
+
+    pub fn from_config(vb: &VarBuilder, c: &GptConfig) -> candle_core::Result<Self> {
+        Self::new(vb, c.num_heads, c.emb_dim, c.bias, c.drop_p)
+    }
 }
 
-impl ModuleT for TransformerBlock {
-    fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
+impl Module for TransformerBlock {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         let shortcut_1 = xs;
-        let x = self.norm_1.forward_t(xs, train)?;
-        let x = self.multi_head.forward_t(&x, train)?;
-        let x = self.dropout.forward_t(&x, train)?;
+        let x = self.norm_1.forward(xs)?;
+        let x = self.multi_head.forward_t(&x, false)?;
+        let x = self.dropout.forward(&x, false)?;
 
         let x = (x + shortcut_1)?; // shortcut connection
 
         let shortcut_2 = &x;
-        let x = self.norm_2.forward_t(&x, train)?;
-        let x = self.feed_forward.forward_t(&x, train)?;
-        let x = self.dropout.forward_t(&x, train)?;
+        let x = self.norm_2.forward(&x)?;
+        let x = self.feed_forward.forward(&x)?;
+        let x = self.dropout.forward(&x, false)?;
 
         x + shortcut_2 // shortcut connection
+    }
+}
+
+pub struct CrossEntropy {
+    pub device: Device,
+    pub train: bool,
+    pub ignore_index: Option<i64>,
+    pub num_batches: Option<usize>,
+}
+
+impl Default for CrossEntropy {
+    fn default() -> Self {
+        Self {
+            device: Device::Cpu,
+            train: true,
+            ignore_index: None,
+            num_batches: None,
+        }
+    }
+}
+
+impl CrossEntropy {
+    pub fn compute(&self, model: &GPTModel, data: Dataset) -> eyre::Result<f32> {
+        let mut total_loss = 0.;
+        let mut count = 0;
+        for batch in data.batches(1) {
+            let (input_batch, target_batch) = batch?;
+
+            let loss = self.compute_single(model, &input_batch, &target_batch)?;
+            total_loss += loss;
+            count += 1;
+            if let Some(n) = self.num_batches
+                && count >= n
+            {
+                break;
+            }
+        }
+        let out = total_loss / count as f32;
+        Ok(out)
+    }
+
+    pub fn compute_single(
+        &self,
+        model: &GPTModel,
+        input_batch: &Tensor,
+        target_batch: &Tensor,
+    ) -> eyre::Result<f32> {
+        let input_batch = input_batch.to_device(&self.device)?;
+        let target_batch = target_batch.to_device(&self.device)?;
+
+        // Forward pass
+        let logits = model.forward_t(&input_batch, self.train)?;
+
+        // flatten
+        let logits_flat = logits.flatten(0, 1)?;
+        let targets_flat = target_batch.flatten_all()?;
+
+        // Optionally filter out ignored indices (e.g., -100)
+        let (logits_flat, targets_flat) = self.filter_indices(logits_flat, targets_flat)?;
+
+        // Forward pass
+        let loss = candle_nn::loss::cross_entropy(&logits_flat, &targets_flat)?;
+        let loss = loss.to_scalar::<f32>()?;
+        Ok(loss)
+    }
+
+    fn filter_indices(
+        &self,
+        logits_flat: Tensor,
+        targets_flat: Tensor,
+    ) -> eyre::Result<(Tensor, Tensor)> {
+        let Some(ignore_val) = self.ignore_index else {
+            return Ok((logits_flat, targets_flat));
+        };
+
+        // get indices to keep
+        let keep = targets_flat
+            .to_vec1::<i64>()? // has to be i64 to include ignore_index of -100
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v != &&ignore_val)
+            .map(|(ix, _)| ix as u32)
+            .collect::<Vec<_>>();
+        let keep = Tensor::new(&keep[..], &self.device)?;
+
+        let logits_flat = logits_flat.index_select(&keep, 0)?;
+        let targets_flat = targets_flat.index_select(&keep, 0)?;
+
+        Ok((logits_flat, targets_flat))
+    }
+}
+
+pub struct TextGenerator {
+    pub model: GPTModel,
+    pub max_new_tokens: usize,
+    pub context_size: usize,
+    pub temperature: Option<f64>,
+    pub top_k: Option<usize>,
+    pub eos_id: Option<Tensor>,
+}
+
+impl TextGenerator {
+    pub fn generate(&self, rng: &mut ThreadRng, idx: Tensor) -> eyre::Result<Tensor> {
+        let mut idx = idx.clone();
+        for _ in 0..self.max_new_tokens {
+            // Limit the context window
+            let (b, seq_len) = idx.dims2()?;
+            let start = seq_len.saturating_sub(self.context_size);
+            let idx_cond = idx.i((.., start..seq_len))?;
+
+            // forward pass
+            let logits = self.model.forward_t(&idx_cond, false)?;
+
+            let (_b, c, _vocab_size) = logits.dims3()?;
+            let logits = logits.i((.., c - 1, ..))?;
+
+            // Apply top-k filter if present
+            let logits = self.prune_logits(logits)?;
+
+            let idx_next = self.compute_probas(rng, &logits, b)?;
+
+            if let Some(ref eos) = self.eos_id {
+                // not sure if this is the right thing to do
+                // eos_id can appear in any of the batch inputs
+                let num_eos = idx_next.broadcast_eq(eos)?.sum_all()?.to_scalar::<u8>()?;
+                if num_eos as usize == b {
+                    break;
+                }
+            }
+
+            idx = Tensor::cat(&[&idx, &idx_next], D::Minus1)?;
+        }
+        Ok(idx)
+    }
+
+    fn prune_logits(&self, logits: Tensor) -> eyre::Result<Tensor> {
+        let Some(top_k) = self.top_k else {
+            return Ok(logits);
+        };
+
+        let (top_logits, _top_pos) = logits.contiguous()?.topk_last_dim1(top_k)?;
+        let mask = logits.broadcast_lt(&top_logits.min_keepdim(D::Minus1)?)?;
+        let on_true = logits
+            .ones_like()?
+            .broadcast_mul(&Tensor::new(f32::NEG_INFINITY, logits.device())?)?;
+        let out = mask.where_cond(&on_true, &logits)?;
+        Ok(out)
+    }
+
+    fn compute_probas(
+        &self,
+        rng: &mut ThreadRng,
+        logits: &Tensor,
+        batch_size: usize,
+    ) -> eyre::Result<Tensor> {
+        let Some(temp) = self.temperature else {
+            // Greedy sampling if no temperature is set
+            let probas = softmax(logits, 1)?;
+            let out = probas.argmax_keepdim(D::Minus1)?;
+            return Ok(out);
+        };
+        // Temperature scaling
+        let logits = (logits / temp)?;
+        let probas = softmax(&logits, D::Minus1)?;
+
+        // Multinomial sampling
+        let mut idx_next = vec![];
+        for bx in 0..batch_size {
+            let this_probas = probas.i((bx, ..))?.to_vec1::<f32>()?;
+            let next_token_id = Self::sample_multinomial(rng, &this_probas)?;
+            idx_next.push(next_token_id);
+        }
+
+        let out = Tensor::from_vec(idx_next, (batch_size, 1_usize), logits.device())?;
+        Ok(out)
+    }
+
+    fn sample_multinomial(rng: &mut ThreadRng, probas: &[f32]) -> eyre::Result<u32> {
+        let dist = WeightedIndex::new(probas).map_err(candle_core::Error::wrap)?;
+        let sample = dist.sample(rng) as u32;
+        Ok(sample)
     }
 }
 
@@ -566,9 +892,9 @@ impl ModuleT for TransformerBlock {
 mod tests {
 
     use super::*;
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::{DType, Device, IndexOp, Tensor};
     use candle_nn::{
-        Dropout, VarBuilder, VarMap, embedding,
+        Activation, Dropout, VarBuilder, VarMap, embedding,
         init::DEFAULT_KAIMING_NORMAL,
         ops::{dropout, softmax},
     };
@@ -578,6 +904,22 @@ mod tests {
     fn gpt2_tokenizer() -> eyre::Result<CoreBPE> {
         let out = get_bpe_from_model("gpt2").map_err(|e| eyre!("{e}"))?;
         Ok(out)
+    }
+
+    fn vb<'a>() -> VarBuilder<'a> {
+        VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu)
+    }
+
+    fn gpt_config() -> GptConfig {
+        GptConfig {
+            vocab_size: 50257,
+            emb_dim: 12,
+            context_length: 256,
+            drop_p: 0.1,
+            num_trf: 2,
+            num_heads: 3,
+            bias: false,
+        }
     }
 
     #[test]
@@ -613,9 +955,9 @@ mod tests {
     #[test]
     fn test_input_target_tokenization() -> eyre::Result<()> {
         let tokenizer = gpt2_tokenizer()?;
-        let dataset = Dataset::from_path("the-verdict.txt", tokenizer)?;
-        let inputs = dataset.inputs;
-        let targets = dataset.targets;
+        let dataset = Dataset::from_path("the-verdict.txt", tokenizer, &Device::Cpu)?;
+        let inputs = dataset.inputs.to_vec2::<u32>()?;
+        let targets = dataset.targets.to_vec2::<u32>()?;
 
         assert_eq!(targets[0][0], inputs[0][1]);
         assert_eq!(targets[0][1], inputs[0][2]);
@@ -630,8 +972,8 @@ mod tests {
         let vocab_size = 50_257_usize;
         let embedding_size = 256_usize; //each tokenid will be associated with a 256-dimenisonal vector
 
-        let dataset = Dataset::from_path("the-verdict.txt", tokenizer)?;
-        let inputs = dataset.inputs;
+        let dataset = Dataset::from_path("the-verdict.txt", tokenizer, &Device::Cpu)?;
+        let inputs = dataset.inputs.to_vec2::<u32>()?;
 
         let device = Device::cuda_if_available(0)?;
         let varmap = VarMap::new();
@@ -678,6 +1020,173 @@ mod tests {
             &dev,
         )?;
         Ok(out)
+    }
+
+    #[test]
+    fn test_self_attention_v2_init() -> eyre::Result<()> {
+        let (d_in, d_out) = (3_usize, 5_usize);
+        let attn_v2_layer = SelfAttentionV2::new(&vb(), d_in, d_out, false)?;
+
+        assert_eq!(attn_v2_layer.w_q.weight().dims(), &[d_out, d_in]);
+        assert_eq!(attn_v2_layer.w_k.weight().dims(), &[d_out, d_in]);
+        assert_eq!(attn_v2_layer.w_v.weight().dims(), &[d_out, d_in]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_self_attention_v2_forward() -> eyre::Result<()> {
+        let (d_in, d_out) = (3_usize, 5_usize);
+        let attn_v2_layer = SelfAttentionV2::new(&vb(), d_in, d_out, false)?;
+
+        let input_length = 10_usize;
+        let xs = Tensor::rand(0f32, 1f32, (input_length, d_in), &Device::Cpu)?;
+        let context_vectors = attn_v2_layer.forward(&xs)?;
+
+        assert_eq!(context_vectors.dims(), &[input_length, d_out]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_causal_attention_init() -> eyre::Result<()> {
+        let (d_in, d_out) = (3_usize, 5_usize);
+        let causal = CausalAttentionV2::new(&vb(), d_in, d_out, false, 0.5)?;
+
+        assert_eq!(causal.attention.w_q.weight().dims(), &[d_out, d_in]);
+        assert_eq!(causal.attention.w_k.weight().dims(), &[d_out, d_in]);
+        assert_eq!(causal.attention.w_v.weight().dims(), &[d_out, d_in]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_causal_attention_forward() -> eyre::Result<()> {
+        let (d_in, d_out) = (3_usize, 5_usize);
+        let causal = CausalAttentionV2::new(&vb(), d_in, d_out, false, 0.5)?;
+
+        // create batch
+        let input_length = 10_usize;
+        let xs = Tensor::rand(0f32, 1f32, (input_length, d_in), &Device::Cpu)?;
+        let batch = Tensor::stack(&[&xs, &xs], 0)?;
+        let context_vectors = causal.forward(&batch)?;
+
+        assert_eq!(context_vectors.dims(), &[2_usize, input_length, d_out]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dummy_gpt_model_init() -> eyre::Result<()> {
+        let cfg = gpt_config();
+        let model = GPTModel::new(&vb(), &cfg)?;
+
+        assert_eq!(model.pos_emb.hidden_size(), cfg.emb_dim);
+        assert_eq!(model.tok_emb.hidden_size(), cfg.emb_dim);
+        assert_eq!(model.trf_blocks.len() as usize, cfg.num_trf);
+        assert_eq!(
+            model.out_head.weight().dims(),
+            &[cfg.vocab_size, cfg.emb_dim]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dummy_gpt_model_forward() -> eyre::Result<()> {
+        let cfg = gpt_config();
+
+        let batch_size = 2_usize;
+        let token_ids = (0..(batch_size * cfg.emb_dim) as u32).collect::<Vec<_>>();
+        let batch_token_ids =
+            Tensor::from_slice(&token_ids, (batch_size, cfg.emb_dim), &Device::Cpu)?;
+
+        let (batch_size, seq_len) = batch_token_ids.dims2()?;
+
+        let model = GPTModel::new(&vb(), &cfg)?;
+
+        let logits = model.forward(&batch_token_ids)?;
+
+        assert_eq!(logits.dims(), &[batch_size, seq_len, cfg.vocab_size]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layer_norm_init() -> eyre::Result<()> {
+        let cfg = gpt_config();
+        let layer_norm = LayerNorm::new(&vb(), cfg.emb_dim)?;
+        assert_eq!(layer_norm.scale.dims(), &[cfg.emb_dim]);
+        assert_eq!(layer_norm.shift.dims(), &[cfg.emb_dim]);
+        assert_eq!(layer_norm.scale.i(..=1)?.to_vec1::<f32>()?, &[1., 1.]);
+        assert_eq!(layer_norm.shift.i(..=1)?.to_vec1::<f32>()?, &[0., 0.]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layer_norm_forward() -> eyre::Result<()> {
+        let cfg = gpt_config();
+        let batch_size = 2_usize;
+        let batch_example = Tensor::rand(0f32, 1f32, (batch_size, cfg.emb_dim), &Device::Cpu)?;
+        let layer_norm = LayerNorm::new(&vb(), cfg.emb_dim)?;
+
+        let out_norm = layer_norm.forward(&batch_example)?;
+        let mean = out_norm.mean_keepdim(D::Minus1)?;
+        let var = out_norm.var_keepdim(D::Minus1)?;
+
+        let mean_minus_zero = mean.broadcast_sub(&mean.zeros_like()?)?.abs()?;
+        let mut mean_minus_zero = mean_minus_zero
+            .to_vec2()?
+            .into_iter()
+            .flatten()
+            .map(|x: f32| x.floor());
+
+        let var_minus_one = var.broadcast_sub(&var.ones_like()?)?.abs()?;
+
+        let mut var_minus_one = var_minus_one
+            .to_vec2()?
+            .into_iter()
+            .flatten()
+            .map(|x: f32| x.floor());
+
+        assert_eq!(out_norm.dims(), &[batch_size, cfg.emb_dim]);
+
+        assert!(var_minus_one.all(|x| x == 0.));
+        assert!(mean_minus_zero.all(|x| x == 0.));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gelu_impl() -> eyre::Result<()> {
+        let dev = Device::cuda_if_available(0)?;
+        let batch_example = Tensor::rand(0f32, 1f32, (2_usize, 3_usize), &dev)?;
+
+        // testing manual impl
+        let gelu = GELU;
+        let out = gelu.forward(&batch_example)?;
+
+        // reference impl
+        let candle_gelu = Activation::Gelu;
+        let candle_out = candle_gelu.forward(&batch_example)?;
+
+        // assert equality
+        let tol: f64 = 1e-3;
+        let abs_diff = (out - candle_out)?.abs()?;
+        assert_eq!(
+            abs_diff.lt(tol)?.sum_all()?.to_scalar::<u8>()?,
+            (2_usize * 3_usize) as u8
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_feedforward_forward() -> eyre::Result<()> {
+        let cfg = gpt_config();
+        let ff = FeedForward::new(&vb(), cfg.emb_dim, false)?;
+
+        // create test batch
+        let (batch_size, seq_len) = (2_usize, 3_usize);
+        let batch_example =
+            Tensor::rand(0f32, 1f32, (batch_size, seq_len, cfg.emb_dim), &Device::Cpu)?;
+        let out = ff.forward(&batch_example)?;
+
+        assert_eq!(out.dims(), &[batch_size, seq_len, cfg.emb_dim]);
+        Ok(())
     }
 
     #[test]
@@ -966,6 +1475,36 @@ mod tests {
     }
 
     #[test]
+    fn mha() -> eyre::Result<()> {
+        let (d_in, d_out, num_heads) = (3_usize, 6_usize, 2_usize);
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let mha = MultiHeadAttention::new(&vb, num_heads, d_in, d_out / num_heads, false, 0.5)?;
+
+        assert_eq!(mha.w_q.weight().dims(), &[d_out, d_in]);
+        assert_eq!(mha.w_k.weight().dims(), &[d_out, d_in]);
+        assert_eq!(mha.w_v.weight().dims(), &[d_out, d_in]);
+        assert_eq!(mha.out_proj.weight().dims(), &[d_out, d_out]);
+        assert_eq!(mha.head_dim, d_out / num_heads);
+        Ok(())
+    }
+
+    #[test]
+    fn mha_forward() -> eyre::Result<()> {
+        let (d_in, d_out, num_heads) = (3_usize, 6_usize, 3_usize);
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let mha = MultiHeadAttention::new(&vb, num_heads, d_in, d_out / num_heads, false, 0.5)?;
+
+        // create batch
+        let input_length = 10_usize;
+        let xs = Tensor::rand(0f32, 1f32, (input_length, d_in), vb.device())?;
+        let batch = Tensor::stack(&[&xs, &xs], 0)?;
+        let context_vectors = mha.forward_t(&batch, false)?;
+
+        assert_eq!(context_vectors.dims(), &[2_usize, input_length, d_out]);
+        Ok(())
+    }
+
+    #[test]
     fn transformer_block() -> eyre::Result<()> {
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
         let num_heads = 4;
@@ -990,6 +1529,267 @@ mod tests {
         debug_assert_eq!(out.dims()[1], num_tokens_per_group);
         debug_assert_eq!(out.dims()[2], emb_dim);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_transformer_block_init() -> eyre::Result<()> {
+        let vb = vb();
+        let cfg = gpt_config();
+        let transformer_block = TransformerBlock::from_config(&vb, &cfg)?;
+
+        assert_eq!(transformer_block.multi_head.num_heads, cfg.num_heads);
+        assert_eq!(
+            transformer_block.multi_head.w_k.weight().dims(),
+            &[cfg.emb_dim, cfg.emb_dim]
+        );
+        assert_eq!(
+            transformer_block.multi_head.w_q.weight().dims(),
+            &[cfg.emb_dim, cfg.emb_dim]
+        );
+        assert_eq!(
+            transformer_block.multi_head.w_v.weight().dims(),
+            &[cfg.emb_dim, cfg.emb_dim]
+        );
+        assert_eq!(
+            transformer_block.multi_head.head_dim,
+            cfg.emb_dim / cfg.num_heads
+        );
+        assert_eq!(transformer_block.feed_forward.0.len(), 3);
+        assert_eq!(transformer_block.norm_1.scale.dims(), &[cfg.emb_dim]);
+        assert_eq!(transformer_block.norm_2.shift.dims(), &[cfg.emb_dim]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_transformer_block() -> eyre::Result<()> {
+        let vb = vb();
+        let cfg = gpt_config();
+        let transformer_block = TransformerBlock::from_config(&vb, &cfg)?;
+
+        let batch_size = 2_usize;
+        let num_tokens = 4_usize;
+        let batch_example = Tensor::rand(
+            0f32,
+            1f32,
+            (batch_size, num_tokens, cfg.emb_dim),
+            vb.device(),
+        )?;
+
+        let out = transformer_block.forward(&batch_example)?;
+        assert_eq!(out.dims(), batch_example.dims());
+        Ok(())
+    }
+
+    #[test]
+    fn test_gpt_model_init() -> eyre::Result<()> {
+        let cfg = gpt_config();
+        let model = GPTModel::new(&vb(), &cfg)?;
+
+        assert_eq!(model.pos_emb.hidden_size(), cfg.emb_dim);
+        assert_eq!(model.tok_emb.hidden_size(), cfg.emb_dim);
+        assert_eq!(model.trf_blocks.len() as usize, cfg.num_trf);
+        assert_eq!(
+            model.out_head.weight().dims(),
+            &[cfg.vocab_size, cfg.emb_dim]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gpt_model_forward() -> eyre::Result<()> {
+        let cfg = gpt_config();
+
+        let batch_size = 2_usize;
+        let token_ids = (0..(batch_size * cfg.emb_dim) as u32).collect::<Vec<_>>();
+        let batch_token_ids =
+            Tensor::from_slice(&token_ids, (batch_size, cfg.emb_dim), &Device::Cpu)?;
+
+        let (batch_size, seq_len) = batch_token_ids.dims2()?;
+
+        let model = GPTModel::new(&vb(), &cfg)?;
+
+        let logits = model.forward(&batch_token_ids)?;
+
+        assert_eq!(logits.dims(), &[batch_size, seq_len, cfg.vocab_size]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gpt() -> eyre::Result<()> {
+        let cfg = gpt_config();
+
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+
+        let vocab_size = cfg.vocab_size;
+        let gpt = GPTModel::new(&vb, &cfg)?;
+
+        let batch_size = 2;
+        let seq_len = 4; // Must be <= context_length (10)
+
+        let xs = Tensor::rand(0f32, vocab_size as f32, (batch_size, seq_len), &Device::Cpu)?
+            .to_dtype(DType::U32)?;
+
+        let _ = gpt.forward(&xs)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_text_simple() -> eyre::Result<()> {
+        let cfg = gpt_config();
+
+        let batch_size = 2_usize;
+        let token_ids = (0..(batch_size * cfg.emb_dim) as u32).collect::<Vec<_>>();
+        let batch_token_ids =
+            Tensor::from_slice(&token_ids, (batch_size, cfg.emb_dim), &Device::Cpu)?;
+
+        let model = GPTModel::new(&vb(), &cfg)?;
+
+        // create sample idx
+        let (batch_size, seq_len) = batch_token_ids.dims2()?;
+        let (context_size, max_new_tokens) = (2_usize, 3_usize);
+        let idx = model.generate_text_simple(batch_token_ids, max_new_tokens, context_size)?;
+
+        assert_eq!(idx.dims(), &[batch_size, seq_len + max_new_tokens]);
+        Ok(())
+    }
+
+    #[test]
+    fn tokenizer_test() -> eyre::Result<()> {
+        let tokenizer = gpt2_tokenizer()?;
+        let mut string = "Every effort moves you".to_string();
+
+        let tokens = tokenizer.encode_with_special_tokens(&string);
+        let tokens = Tensor::from_iter(tokens.into_iter(), &Device::Cpu)?;
+        let tokens = tokens.unsqueeze(0)?;
+
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let model = GPTModel::new(&vb, &gpt_config())?;
+
+        let logits = model.forward(&tokens)?;
+
+        let (_, c, _) = logits.dims3()?;
+        // Pick last column and return the position of the highest logit
+        let logits = logits.i((.., c - 1, ..))?;
+        let token_id = logits.argmax(D::Minus1)?;
+        let out = tokenizer
+            .decode(token_id.to_vec1()?)
+            .map_err(|e| eyre!(e))?;
+
+        string.push_str(&out);
+
+        println!("{}", string);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cross_entropy() -> eyre::Result<()> {
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let model = GPTModel::new(&vb, &gpt_config())?;
+
+        let inputs = Tensor::new(&[[100_u32, 20, 300], [400, 7, 88]], vb.device())?;
+        let targets = Tensor::new(&[[1_u32, 2, 3], [4, 5, 9]], vb.device())?;
+
+        let c_entropy = CrossEntropy::default();
+        let loss = c_entropy.compute_single(&model, &inputs, &targets)?;
+        debug_assert!(loss > 0.);
+
+        let data = Dataset::new(inputs, targets);
+        let loss2 = c_entropy.compute(&model, data)?;
+        debug_assert!((loss - loss2).abs() < 1e-5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_calc_loss_batch_with_ignore_index() -> eyre::Result<()> {
+        // create model
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let model = GPTModel::new(&vb, &gpt_config())?;
+
+        // create sample inputs
+        let inputs = Tensor::new(&[[100_u32, 20, 300]], vb.device())?;
+        let targets = Tensor::new(&[[1_u32, 2, 3]], vb.device())?;
+        let loss = CrossEntropy::default().compute_single(&model, &inputs, &targets)?;
+
+        let inputs_2 = Tensor::new(&[[100_u32, 20, 300], [400, 7, 88]], vb.device())?;
+        let targets_2 = Tensor::new(&[[1_i64, 2, 3], [-100, -100, -100]], vb.device())?;
+        let c_entropy = CrossEntropy {
+            ignore_index: Some(-100),
+            train: false,
+            ..Default::default()
+        };
+        let loss_2 = c_entropy.compute_single(&model, &inputs_2, &targets_2)?;
+
+        assert_eq!(loss, loss_2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn loss_metrics() -> eyre::Result<()> {
+        let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu);
+        let model = GPTModel::new(&vb, &gpt_config())?;
+        let tokenizer = gpt2_tokenizer()?;
+
+        // inputs and target tensors
+        let inputs = Tensor::new(&[[16833_u32, 3626, 6100], [40, 1107, 588]], vb.device())?;
+        let targets = Tensor::new(&[[3626_u32, 6100, 345], [1107, 588, 11311]], vb.device())?;
+
+        let logits = model.forward(&inputs)?;
+        let probas = softmax(&logits, D::Minus1)?;
+
+        let predicted = probas.argmax_keepdim(D::Minus1)?; //token ids
+
+        let target_text = tokenizer
+            .decode(targets.i(0)?.to_vec1::<u32>()?)
+            .map_err(|e| eyre!(e))?;
+
+        let predicted_text = tokenizer
+            .decode(predicted.i(0)?.flatten_all()?.to_vec1::<u32>()?)
+            .map_err(|e| eyre!(e))?;
+
+        println!("{target_text}");
+        println!("{predicted_text}");
+        Ok(())
+    }
+
+    #[test]
+    fn encdec() -> eyre::Result<()> {
+        let t = gpt2_tokenizer().map(Tokenizer::from)?;
+        let txt = "In the heart of the city";
+        let enc = t.text_to_token_ids(txt, &Device::Cpu)?;
+        let dec = t.token_ids_to_text(&enc)?;
+        debug_assert_eq!(txt, dec);
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate() -> eyre::Result<()> {
+        let dev = Device::cuda_if_available(0)?;
+        let batch_token_ids = Tensor::new(&[[101_u32, 366, 100, 345], [101, 110, 322, 57]], &dev)?;
+
+        let model = GPTModel::new(&vb(), &gpt_config())?;
+
+        // create sample idx
+        let (batch_size, seq_len) = batch_token_ids.dims2()?;
+        let (context_size, max_new_tokens) = (2_usize, 3_usize);
+        let rng = &mut rand::rng();
+
+        let txt_gen = TextGenerator {
+            model,
+            max_new_tokens,
+            context_size,
+            temperature: Some(1.),
+            top_k: Some(3),
+            eos_id: None,
+        };
+
+        let idx = txt_gen.generate(rng, batch_token_ids)?;
+
+        assert_eq!(idx.dims(), &[batch_size, seq_len + max_new_tokens]);
         Ok(())
     }
 }

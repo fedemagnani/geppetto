@@ -9,3 +9,4 @@ eyre = "0.6.12"
 tiktoken-rs = "0.6.0"
 candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.9.1" }
 candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.9.1" }
+rand = "0.9.2"
