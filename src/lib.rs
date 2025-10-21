@@ -1,16 +1,21 @@
-use core::f32;
-use std::collections::HashSet;
-use std::f64;
-use std::{fs, path::Path};
-
+use candle_core::DType;
 use candle_core::{D, Device, IndexOp, Tensor};
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
-use candle_nn::{Dropout, Embedding, Linear, ModuleT, VarBuilder, embedding, linear_b};
+use candle_nn::{
+    AdamW, Dropout, Embedding, Linear, ModuleT, Optimizer, VarBuilder, embedding, linear_b,
+};
+use core::f32;
 use eyre::eyre;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
+use rand::rng;
 use rand::rngs::ThreadRng;
+use rand::seq::SliceRandom;
+use std::collections::HashSet;
+use std::io::Write;
+use std::{f64, io};
+use std::{fs, path::Path};
 use tiktoken_rs::CoreBPE;
 
 /// Trait for returning top-k elements of a Tensor
@@ -34,7 +39,7 @@ impl TopK for Tensor {
         // get CUDA error sometimes when using `.arg_sort_last_dim`
         // moving to CPU to carry out the op
         let top_pos = self.to_device(&Device::Cpu)?.arg_sort_last_dim(false)?;
-        let top_pos = top_pos.to_device(&Device::cuda_if_available(0)?)?;
+        let top_pos = top_pos.to_device(self.device())?;
         let (batch_size, vocab_size) = top_pos.dims2()?;
         let top_pos = top_pos.i((.., ..top_k))?.flatten_all()?;
 
@@ -316,40 +321,27 @@ impl ModuleT for CausalAttentionV2 {
         self.context_vectors(xs, train)
     }
 }
+
 pub struct Dataset {
-    inputs: Tensor,
-    targets: Tensor,
+    pub train: TensorDataset,
+    pub test: TensorDataset,
 }
 
 impl Dataset {
-    pub fn new(inputs: Tensor, targets: Tensor) -> Self {
-        Self { inputs, targets }
-    }
-
-    pub fn from_vec(
-        inputs: Vec<Vec<u32>>,
-        targets: Vec<Vec<u32>>,
-        device: &Device,
-    ) -> candle_core::Result<Self> {
-        let n = inputs.len();
-        let emb_dim = inputs[0].len();
-        let inputs = inputs.into_iter().flatten();
-        let targets = targets.into_iter().flatten();
-        let inputs = Tensor::from_iter(inputs, device)?.reshape((n, emb_dim))?;
-        let targets = Tensor::from_iter(targets, device)?.reshape((n, emb_dim))?;
-
-        Ok(Self { inputs, targets })
+    pub fn new(train: TensorDataset, test: TensorDataset) -> Self {
+        Self { train, test }
     }
 
     pub fn from_path<P: AsRef<Path>>(
         path: P,
-        tokenizer: CoreBPE,
+        tokenizer: &Tokenizer,
         device: &Device,
-    ) -> eyre::Result<Dataset> {
+        train_pct: f32,
+    ) -> eyre::Result<Self> {
         let values = fs::read_to_string(path)?;
 
         //map the whole text in tokenids
-        let token_ids = tokenizer.encode_with_special_tokens(&values);
+        let token_ids = tokenizer.0.encode_with_special_tokens(&values);
 
         let max_length = 4;
         let stride = 2;
@@ -366,7 +358,49 @@ impl Dataset {
             targets.push(target);
         }
 
-        Ok(Self::from_vec(inputs, targets, device)?)
+        let split_i = train_pct * inputs.len() as f32;
+        let split_i = split_i.round() as usize;
+
+        // Split into train/test slices
+        let (train_inputs, test_inputs) = inputs.split_at(split_i);
+        let (train_targets, test_targets) = targets.split_at(split_i);
+
+        let train = TensorDataset::from_vec(train_inputs.to_vec(), train_targets.to_vec(), device)?;
+        let test = TensorDataset::from_vec(test_inputs.to_vec(), test_targets.to_vec(), device)?;
+
+        Ok(Self::new(train, test))
+    }
+}
+
+pub struct TensorDataset {
+    inputs: Tensor,
+    targets: Tensor,
+}
+
+impl TensorDataset {
+    pub fn new(inputs: Tensor, targets: Tensor) -> Self {
+        Self { inputs, targets }
+    }
+
+    pub fn from_vec(
+        inputs: Vec<Vec<u32>>,
+        targets: Vec<Vec<u32>>,
+        device: &Device,
+    ) -> candle_core::Result<Self> {
+        let n = inputs.len();
+        if n == 0 {
+            return Ok(Self {
+                inputs: Tensor::zeros(0, DType::U32, device)?,
+                targets: Tensor::zeros(0, DType::U32, device)?,
+            });
+        }
+        let emb_dim = inputs[0].len();
+        let inputs = inputs.into_iter().flatten();
+        let targets = targets.into_iter().flatten();
+        let inputs = Tensor::from_iter(inputs, device)?.reshape((n, emb_dim))?;
+        let targets = Tensor::from_iter(targets, device)?.reshape((n, emb_dim))?;
+
+        Ok(Self { inputs, targets })
     }
 
     pub fn inputs(&self) -> &Tensor {
@@ -380,9 +414,15 @@ impl Dataset {
     pub fn batches(
         &self,
         batch_size: usize,
+        shuffle: bool,
     ) -> impl Iterator<Item = candle_core::Result<(Tensor, Tensor)>> {
         let n = self.inputs.dims()[0];
-        (0..n).step_by(batch_size).map(move |start| {
+        let mut start_indices: Vec<usize> = (0..n - batch_size).step_by(batch_size).collect();
+        if shuffle {
+            start_indices.shuffle(&mut rng());
+        }
+
+        start_indices.into_iter().map(move |start| {
             let end = (start + batch_size).min(n);
             Ok((
                 self.inputs.narrow(0, start, end - start)?,
@@ -422,7 +462,7 @@ impl MultiHeadAttention {
 
         let dropout = Dropout::new(drop_p);
 
-        let out_proj = linear_b(d_k, d_k, true, vb.pp("O_p"))?;
+        let out_proj = linear_b(d_k, d_k, bias, vb.pp("O_p"))?;
 
         let out = Self {
             num_heads,
@@ -549,16 +589,17 @@ impl GPTModel {
         &self,
         mut idx: Tensor,
         max_new_tokens: usize,
-        context_size: usize,
+        context_length: usize,
+        train: bool,
     ) -> candle_core::Result<Tensor> {
         for _ in 0..max_new_tokens {
             // Limit the context window
             let (_b, seq_len) = idx.dims2()?;
-            let start = seq_len.saturating_sub(context_size);
+            let start = seq_len.saturating_sub(context_length);
             let idx_cond = idx.i((.., start..seq_len))?;
 
             // Forward pass
-            let logits = self.forward_t(&idx_cond, false)?;
+            let logits = self.forward_t(&idx_cond, train)?;
 
             // Get last logits
             let (_b, c, _vocab_size) = logits.dims3()?;
@@ -729,11 +770,70 @@ impl ModuleT for TransformerBlock {
     }
 }
 
+pub struct Trainer {
+    pub entropy: CrossEntropy,
+    pub optimizer: AdamW,
+    pub shuffle_batches: bool,
+}
+
+impl Trainer {
+    pub fn new(entropy: CrossEntropy, optimizer: AdamW, shuffle_batches: bool) -> Self {
+        Self {
+            entropy,
+            optimizer,
+            shuffle_batches,
+        }
+    }
+    pub fn train(
+        &mut self,
+        model: &GPTModel,
+        data: Dataset,
+        epochs: usize,
+        batch_size: usize,
+    ) -> eyre::Result<()> {
+        let mut i = 0;
+        for epoch in 0..epochs {
+            for batch in data.train.batches(batch_size, self.shuffle_batches) {
+                let (input_batch, target_batch) = batch?;
+                let loss = self
+                    .entropy
+                    .loss_tensor(model, &input_batch, &target_batch)?;
+                self.optimizer.backward_step(&loss)?;
+
+                if i % 10 == 0 {
+                    println!(
+                        "Epoch: {epoch}/{epochs}, Batch: {i}, Train Loss: {}",
+                        loss.to_scalar::<f32>()?
+                    );
+                    io::stdout().flush()?;
+
+                    // --- Validation Loop ---
+                    let mut val_loss_sum = 0.0;
+                    let mut val_batches = 0;
+                    for batch in data.test.batches(batch_size, false) {
+                        let (input_batch, target_batch) = batch?;
+                        let loss = self
+                            .entropy
+                            .loss_tensor(model, &input_batch, &target_batch)?;
+                        // We dont perform the step here, as its a validation set
+                        val_loss_sum += loss.to_scalar::<f32>()?;
+                        val_batches += 1;
+                    }
+                    let val_loss_avg = val_loss_sum / val_batches as f32;
+                    println!("Epoch {epoch}/{epochs} Avg Validation Loss: {val_loss_avg}");
+                    io::stdout().flush()?
+                }
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct CrossEntropy {
     pub device: Device,
     pub train: bool,
     pub ignore_index: Option<i64>,
-    pub num_batches: Option<usize>,
 }
 
 impl Default for CrossEntropy {
@@ -742,37 +842,37 @@ impl Default for CrossEntropy {
             device: Device::Cpu,
             train: false,
             ignore_index: None,
-            num_batches: None,
         }
     }
 }
 
 impl CrossEntropy {
-    pub fn compute(&self, model: &GPTModel, data: Dataset, batch_size: usize) -> eyre::Result<f32> {
+    pub fn compute(
+        &self,
+        model: &GPTModel,
+        data: TensorDataset,
+        batch_size: usize,
+        shuffle_batches: bool,
+    ) -> eyre::Result<f32> {
         let mut total_loss = 0.;
         let mut count = 0;
-        for batch in data.batches(batch_size) {
+        for batch in data.batches(batch_size, shuffle_batches) {
             let (input_batch, target_batch) = batch?;
 
-            let loss = self.compute_single(model, &input_batch, &target_batch)?;
+            let loss = self.loss_scalar(model, &input_batch, &target_batch)?;
             total_loss += loss;
             count += 1;
-            if let Some(n) = self.num_batches
-                && count >= n
-            {
-                break;
-            }
         }
         let out = total_loss / count as f32;
         Ok(out)
     }
 
-    pub fn compute_single(
+    pub fn loss_tensor(
         &self,
         model: &GPTModel,
         input_batch: &Tensor,
         target_batch: &Tensor,
-    ) -> eyre::Result<f32> {
+    ) -> eyre::Result<Tensor> {
         let input_batch = input_batch.to_device(&self.device)?;
         let target_batch = target_batch.to_device(&self.device)?;
 
@@ -781,13 +881,27 @@ impl CrossEntropy {
 
         // flatten
         let logits_flat = logits.flatten(0, 1)?;
-        let targets_flat = target_batch.flatten_all()?;
+        let mut targets_flat = target_batch.flatten_all()?;
+
+        if targets_flat.dtype() != candle_core::DType::I64 {
+            targets_flat = targets_flat.to_dtype(candle_core::DType::I64)?;
+        }
 
         // Optionally filter out ignored indices (e.g., -100)
         let (logits_flat, targets_flat) = self.filter_indices(logits_flat, targets_flat)?;
 
         // Forward pass
         let loss = candle_nn::loss::cross_entropy(&logits_flat, &targets_flat)?;
+        Ok(loss)
+    }
+
+    pub fn loss_scalar(
+        &self,
+        model: &GPTModel,
+        input_batch: &Tensor,
+        target_batch: &Tensor,
+    ) -> eyre::Result<f32> {
+        let loss = self.loss_tensor(model, input_batch, target_batch)?;
         let loss = loss.to_scalar::<f32>()?;
         Ok(loss)
     }
@@ -828,7 +942,7 @@ pub struct TextGenerator {
 }
 
 impl TextGenerator {
-    pub fn generate(&self, rng: &mut ThreadRng, idx: Tensor) -> eyre::Result<Tensor> {
+    pub fn generate(&self, rng: &mut ThreadRng, idx: Tensor, train: bool) -> eyre::Result<Tensor> {
         let mut idx = idx.clone();
         for _ in 0..self.max_new_tokens {
             // Limit the context window
@@ -837,7 +951,7 @@ impl TextGenerator {
             let idx_cond = idx.i((.., start..seq_len))?;
 
             // forward pass
-            let logits = self.model.forward_t(&idx_cond, false)?;
+            let logits = self.model.forward_t(&idx_cond, train)?;
 
             let (_b, c, _vocab_size) = logits.dims3()?;
             let logits = logits.i((.., c - 1, ..))?;
@@ -916,7 +1030,7 @@ mod tests {
     use super::*;
     use candle_core::{DType, Device, IndexOp, Tensor};
     use candle_nn::{
-        Activation, Dropout, VarBuilder, VarMap, embedding,
+        Activation, Dropout, ParamsAdamW, VarBuilder, VarMap, embedding,
         init::DEFAULT_KAIMING_NORMAL,
         ops::{dropout, softmax},
     };
@@ -935,11 +1049,11 @@ mod tests {
     fn gpt_config() -> GptConfig {
         GptConfig {
             vocab_size: 50257,
-            emb_dim: 12,
+            emb_dim: 768,
             context_length: 256,
             drop_p: 0.1,
-            num_trf: 2,
-            num_heads: 3,
+            num_trf: 12,
+            num_heads: 12,
             bias: false,
         }
     }
@@ -976,10 +1090,11 @@ mod tests {
 
     #[test]
     fn test_input_target_tokenization() -> eyre::Result<()> {
-        let tokenizer = gpt2_tokenizer()?;
-        let dataset = Dataset::from_path("the-verdict.txt", tokenizer, &Device::Cpu)?;
-        let inputs = dataset.inputs.to_vec2::<u32>()?;
-        let targets = dataset.targets.to_vec2::<u32>()?;
+        let tokenizer: Tokenizer = gpt2_tokenizer()?.into();
+
+        let dataset = Dataset::from_path("the-verdict.txt", &tokenizer, &Device::Cpu, 1.)?;
+        let inputs = dataset.train.inputs.to_vec2::<u32>()?;
+        let targets = dataset.train.targets.to_vec2::<u32>()?;
 
         assert_eq!(targets[0][0], inputs[0][1]);
         assert_eq!(targets[0][1], inputs[0][2]);
@@ -990,12 +1105,12 @@ mod tests {
 
     #[test]
     fn test_embeddings() -> eyre::Result<()> {
-        let tokenizer = gpt2_tokenizer()?; //gpt2 BPE tokenizer has 50257 tokens
+        let tokenizer: Tokenizer = gpt2_tokenizer()?.into(); //gpt2 BPE tokenizer has 50257 tokens
         let vocab_size = 50_257_usize;
         let embedding_size = 256_usize; //each tokenid will be associated with a 256-dimenisonal vector
 
-        let dataset = Dataset::from_path("the-verdict.txt", tokenizer, &Device::Cpu)?;
-        let inputs = dataset.inputs.to_vec2::<u32>()?;
+        let dataset = Dataset::from_path("the-verdict.txt", &tokenizer, &Device::Cpu, 1.)?;
+        let inputs = dataset.train.inputs.to_vec2::<u32>()?;
 
         let device = Device::cuda_if_available(0)?;
         let varmap = VarMap::new();
@@ -1670,7 +1785,8 @@ mod tests {
         // create sample idx
         let (batch_size, seq_len) = batch_token_ids.dims2()?;
         let (context_size, max_new_tokens) = (2_usize, 3_usize);
-        let idx = model.generate_text_simple(batch_token_ids, max_new_tokens, context_size)?;
+        let idx =
+            model.generate_text_simple(batch_token_ids, max_new_tokens, context_size, false)?;
 
         assert_eq!(idx.dims(), &[batch_size, seq_len + max_new_tokens]);
         Ok(())
@@ -1714,11 +1830,11 @@ mod tests {
         let targets = Tensor::new(&[[1_u32, 2, 3], [4, 5, 9]], vb.device())?;
 
         let c_entropy = CrossEntropy::default();
-        let loss = c_entropy.compute_single(&model, &inputs, &targets)?;
+        let loss = c_entropy.loss_scalar(&model, &inputs, &targets)?;
         debug_assert!(loss > 0.);
 
-        let data = Dataset::new(inputs, targets);
-        let loss2 = c_entropy.compute(&model, data, 1)?;
+        let data = TensorDataset::new(inputs, targets);
+        let loss2 = c_entropy.compute(&model, data, 1, false)?;
         debug_assert!((loss - loss2).abs() < 1e-5);
 
         Ok(())
@@ -1733,7 +1849,7 @@ mod tests {
         // create sample inputs
         let inputs = Tensor::new(&[[100_u32, 20, 300]], vb.device())?;
         let targets = Tensor::new(&[[1_u32, 2, 3]], vb.device())?;
-        let loss = CrossEntropy::default().compute_single(&model, &inputs, &targets)?;
+        let loss = CrossEntropy::default().loss_scalar(&model, &inputs, &targets)?;
 
         let inputs_2 = Tensor::new(&[[100_u32, 20, 300], [400, 7, 88]], vb.device())?;
         let targets_2 = Tensor::new(&[[1_i64, 2, 3], [-100, -100, -100]], vb.device())?;
@@ -1742,7 +1858,7 @@ mod tests {
             train: false,
             ..Default::default()
         };
-        let loss_2 = c_entropy.compute_single(&model, &inputs_2, &targets_2)?;
+        let loss_2 = c_entropy.loss_scalar(&model, &inputs_2, &targets_2)?;
 
         assert_eq!(loss, loss_2);
 
@@ -1808,9 +1924,44 @@ mod tests {
             eos_id: None,
         };
 
-        let idx = txt_gen.generate(rng, batch_token_ids)?;
+        let idx = txt_gen.generate(rng, batch_token_ids, false)?;
 
         assert_eq!(idx.dims(), &[batch_size, seq_len + max_new_tokens]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_train() -> eyre::Result<()> {
+        println!("Starting");
+        let var_map = VarMap::new();
+        let vb = VarBuilder::from_varmap(&var_map, DType::F32, &Device::new_metal(0)?);
+        let cfg = gpt_config();
+        let model = GPTModel::new(&vb, &cfg)?;
+        let tokenizer: Tokenizer = gpt2_tokenizer()?.into();
+        println!("Reading the novel");
+        let data = Dataset::from_path("the-verdict.txt", &tokenizer, vb.device(), 0.8)?;
+        println!("starting training");
+        let entropy = CrossEntropy {
+            train: true,
+            device: vb.device().clone(),
+            ..Default::default()
+        };
+        let optimizer = AdamW::new(
+            var_map.all_vars(),
+            ParamsAdamW {
+                lr: 0.0004,
+                weight_decay: 0.1,
+                ..Default::default()
+            },
+        )?;
+        let mut trainer = Trainer::new(entropy, optimizer, true);
+        trainer.train(&model, data, 10, 2)?;
+
+        let ids = tokenizer.text_to_token_ids("In the hearth of the city", vb.device())?;
+        let out = model.generate_text_simple(ids, 20, cfg.context_length, false)?;
+        let text = tokenizer.token_ids_to_text(&out)?;
+        println!("{text}");
+
         Ok(())
     }
 }
