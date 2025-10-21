@@ -21,14 +21,18 @@ pub struct GPTModel {
 
 impl GPTModel {
     pub fn new(vb: &VarBuilder, c: &GptConfig) -> candle_core::Result<Self> {
-        let tok_emb = embedding(c.vocab_size, c.emb_dim, vb.pp("tok_emb"))?;
-        let pos_emb = embedding(c.context_length, c.emb_dim, vb.pp("pos_emb"))?;
+        let tok_emb = embedding(c.vocab_size, c.emb_dim, vb.pp("wte"))?;
+        let pos_emb = embedding(c.context_length, c.emb_dim, vb.pp("wpe"))?;
         let drop_emb = Dropout::new(c.drop_p);
+        let vbh = vb.pp("h");
         let mut trf_blocks = Vec::with_capacity(c.num_trf);
-        for _ in 0..c.num_trf {
-            trf_blocks.push(TransformerBlock::from_config(vb, c)?)
+        for i in 0..c.num_trf {
+            let vbhi = vbh.pp(i);
+            trf_blocks.push(TransformerBlock::from_config(&vbhi, c)?)
         }
-        let final_norm = LayerNorm::new(vb, c.emb_dim)?;
+        // let final_norm = CustomLayerNorm::new(vb, c.emb_dim)?;
+
+        let final_norm = layer_norm(c.emb_dim, LayerNormConfig::default(), vb.pp("ln_f"))?;
         let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
         let out = Self {
             tok_emb,

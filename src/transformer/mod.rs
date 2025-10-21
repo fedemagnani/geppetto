@@ -1,8 +1,7 @@
 pub use super::*;
 mod attention;
 pub use attention::*;
-mod norm;
-pub use norm::*;
+
 mod feed_forward;
 pub use feed_forward::*;
 
@@ -16,17 +15,27 @@ pub struct TransformerBlock {
 
 impl TransformerBlock {
     pub fn new(
-        vb: &VarBuilder,
+        vbhi: &VarBuilder,
         num_heads: usize,
         emb_dim: usize,
         bias: bool,
         drop_p: f32,
     ) -> candle_core::Result<Self> {
-        let norm_1 = LayerNorm::new(vb, emb_dim)?;
-        let multi_head =
-            MultiHeadAttention::new(vb, num_heads, emb_dim, emb_dim / num_heads, bias, drop_p)?;
-        let norm_2 = LayerNorm::new(vb, emb_dim)?;
-        let feed_forward = FeedForward::new(vb, emb_dim, bias)?;
+        let norm_1 = layer_norm(emb_dim, LayerNormConfig::default(), vbhi.pp("ln_1"))?;
+        let vbhiattn = vbhi.pp("attn");
+        let multi_head = MultiHeadAttention::new(
+            &vbhiattn,
+            num_heads,
+            emb_dim,
+            emb_dim / num_heads,
+            bias,
+            drop_p,
+        )?;
+
+        let norm_2 = layer_norm(emb_dim, LayerNormConfig::default(), vbhi.pp("ln_2"))?;
+
+        let vbhimlp = vbhi.pp("mlp");
+        let feed_forward = FeedForward::new(&vbhimlp, emb_dim, bias)?;
         let dropout = Dropout::new(drop_p);
         let out = Self {
             norm_1,

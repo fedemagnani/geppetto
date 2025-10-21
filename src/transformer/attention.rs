@@ -22,15 +22,15 @@ impl MultiHeadAttention {
         drop_p: f32,
     ) -> candle_core::Result<Self> {
         let d_k = num_heads * head_dim; // total columns of weight matrix
-        let w_q = linear_b(emb_vec_size, d_k, bias, vb.pp("W_q"))?;
-        let w_k = linear_b(emb_vec_size, d_k, bias, vb.pp("W_k"))?;
-        let w_v = linear_b(emb_vec_size, d_k, bias, vb.pp("W_v"))?;
+        let w_q = linear_b(emb_vec_size, d_k, bias, vb.pp("query"))?; // TODO: Need to decompose from c_attn
+        let w_k = linear_b(emb_vec_size, d_k, bias, vb.pp("key"))?; // TODO: Need to decompose from c_attn
+        let w_v = linear_b(emb_vec_size, d_k, bias, vb.pp("value"))?; // TODO: Need to decompose from c_attn
 
         let scaling = 1. / (head_dim as f64).sqrt();
 
         let dropout = Dropout::new(drop_p);
 
-        let out_proj = linear_b(d_k, d_k, bias, vb.pp("O_p"))?;
+        let out_proj = linear_b(d_k, d_k, bias, vb.pp("c_proj"))?;
 
         let out = Self {
             num_heads,

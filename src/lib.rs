@@ -1,10 +1,13 @@
 use candle_core::DType;
 use candle_core::{D, Device, IndexOp, Tensor};
+use candle_nn::LayerNorm;
 use candle_nn::init::DEFAULT_KAIMING_NORMAL;
 use candle_nn::ops::softmax;
 use candle_nn::{
     AdamW, Dropout, Embedding, Linear, ModuleT, Optimizer, VarBuilder, embedding, linear_b,
 };
+use candle_nn::{LayerNormConfig, layer_norm};
+
 use core::f32;
 use eyre::eyre;
 use rand::distr::Distribution;
@@ -30,6 +33,9 @@ pub use data::*;
 
 mod gpt;
 pub use gpt::*;
+
+mod custom_norm;
+pub use custom_norm::*;
 
 #[cfg(test)]
 mod tests {
@@ -253,7 +259,7 @@ mod tests {
     #[test]
     fn test_layer_norm_init() -> eyre::Result<()> {
         let cfg = gpt_config();
-        let layer_norm = LayerNorm::new(&vb(), cfg.emb_dim)?;
+        let layer_norm = CustomLayerNorm::new(&vb(), cfg.emb_dim)?;
         assert_eq!(layer_norm.scale.dims(), &[cfg.emb_dim]);
         assert_eq!(layer_norm.shift.dims(), &[cfg.emb_dim]);
         assert_eq!(layer_norm.scale.i(..=1)?.to_vec1::<f32>()?, &[1., 1.]);
@@ -266,7 +272,7 @@ mod tests {
         let cfg = gpt_config();
         let batch_size = 2_usize;
         let batch_example = Tensor::rand(0f32, 1f32, (batch_size, cfg.emb_dim), &Device::Cpu)?;
-        let layer_norm = LayerNorm::new(&vb(), cfg.emb_dim)?;
+        let layer_norm = CustomLayerNorm::new(&vb(), cfg.emb_dim)?;
 
         let out_norm = layer_norm.forward_t(&batch_example, false)?;
         let mean = out_norm.mean_keepdim(D::Minus1)?;
@@ -699,8 +705,7 @@ mod tests {
             transformer_block.multi_head.head_dim,
             cfg.emb_dim / cfg.num_heads
         );
-        assert_eq!(transformer_block.norm_1.scale.dims(), &[cfg.emb_dim]);
-        assert_eq!(transformer_block.norm_2.shift.dims(), &[cfg.emb_dim]);
+
         Ok(())
     }
 
