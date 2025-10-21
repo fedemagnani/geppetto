@@ -3,7 +3,7 @@ use super::*;
 pub struct TextGenerator {
     pub model: GPTModel,
     pub max_new_tokens: usize,
-    pub context_size: usize,
+    pub context_length: usize,
     pub temperature: Option<f64>,
     pub top_k: Option<usize>,
     pub eos_id: Option<Tensor>,
@@ -15,7 +15,7 @@ impl TextGenerator {
         for _ in 0..self.max_new_tokens {
             // Limit the context window
             let (b, seq_len) = idx.dims2()?;
-            let start = seq_len.saturating_sub(self.context_size);
+            let start = seq_len.saturating_sub(self.context_length);
             let idx_cond = idx.i((.., start..seq_len))?;
 
             // forward pass

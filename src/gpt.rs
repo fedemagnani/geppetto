@@ -16,7 +16,7 @@ pub struct GPTModel {
     pub drop_emb: Dropout,
     pub trf_blocks: Vec<TransformerBlock>,
     pub final_norm: LayerNorm,
-    pub out_head: Linear,
+    // pub out_head: Linear,
 }
 
 impl GPTModel {
@@ -33,14 +33,14 @@ impl GPTModel {
         // let final_norm = CustomLayerNorm::new(vb, c.emb_dim)?;
 
         let final_norm = layer_norm(c.emb_dim, LayerNormConfig::default(), vb.pp("ln_f"))?;
-        let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
+        // let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
         let out = Self {
             tok_emb,
             pos_emb,
             drop_emb,
             trf_blocks,
             final_norm,
-            out_head,
+            // out_head,
         };
         Ok(out)
     }
@@ -91,8 +91,8 @@ impl ModuleT for GPTModel {
             x = t.forward_t(&x, train)?;
         }
 
-        let x = self.final_norm.forward_t(&x, train)?;
-        let logits = self.out_head.forward_t(&x, train)?;
+        let logits = self.final_norm.forward_t(&x, train)?;
+        // let logits = self.out_head.forward_t(&logits, train)?;
         Ok(logits)
     }
 }

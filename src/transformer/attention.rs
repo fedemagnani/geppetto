@@ -70,6 +70,10 @@ impl MultiHeadAttention {
 impl ModuleT for MultiHeadAttention {
     fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
         let (num_batches, emb_vec_size, _) = xs.dims3()?;
+
+        println!("WK DIMS: {:?}", self.w_q.weight().dims());
+        println!("WK STRIDE: {:?}", self.w_q.weight().stride());
+        println!("WK CONTIGUOUS: {}", self.w_q.weight().is_contiguous());
         let queries = self.w_q.forward_t(xs, train)?;
         let keys = self.w_k.forward_t(xs, train)?;
         let values = self.w_v.forward_t(xs, train)?;

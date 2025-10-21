@@ -56,6 +56,9 @@ impl ModuleT for TransformerBlock {
     fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
         let shortcut_1 = xs;
         let x = self.norm_1.forward_t(xs, train)?;
+
+        println!("LN1 DIMSSS {:?}", x.dims());
+
         let x = self.multi_head.forward_t(&x, train)?;
         let x = self.dropout.forward_t(&x, train)?;
 
