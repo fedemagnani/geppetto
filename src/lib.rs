@@ -12,8 +12,7 @@ use rand::distr::weighted::WeightedIndex;
 use rand::rng;
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
-use std::io::Write;
-use std::{f64, io};
+use std::f64;
 use std::{fs, path::Path};
 use tiktoken_rs::CoreBPE;
 

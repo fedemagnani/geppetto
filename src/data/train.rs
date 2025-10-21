@@ -35,7 +35,6 @@ impl Trainer {
                         "Epoch: {epoch}/{epochs}, Batch: {i}, Train Loss: {}",
                         loss.to_scalar::<f32>()?
                     );
-                    io::stdout().flush()?;
 
                     // --- Validation Loop ---
                     let mut val_loss_sum = 0.0;
@@ -51,7 +50,6 @@ impl Trainer {
                     }
                     let val_loss_avg = val_loss_sum / val_batches as f32;
                     println!("Epoch {epoch}/{epochs} Avg Validation Loss: {val_loss_avg}");
-                    io::stdout().flush()?
                 }
                 i += 1;
             }
