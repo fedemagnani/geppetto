@@ -1,6 +1,6 @@
 use candle_core::{DType, Device, IndexOp};
 use candle_nn::VarBuilder;
-use eyre::eyre;
+use eyre::{ContextCompat, eyre};
 use geppetto::{GPTModel, GptConfig, TextGenerator, Tokenizer};
 use hf_hub::api::sync::Api;
 use rand::rng;
@@ -18,7 +18,7 @@ fn gpt2_small_config() -> GptConfig {
         num_trf: 12,
         num_heads: 12,
         drop_p: 0.1,
-        bias: false,
+        bias: true,
     }
 }
 
@@ -60,6 +60,9 @@ fn main() -> eyre::Result<()> {
         *v = v.t()?;
     }
 
+    let t = weights.get("wte.weight").context("wte.weight not found")?;
+    weights.insert("out_head.weight".to_string(), t.clone());
+
     for (k, _) in weights.iter() {
         println!("{k}");
     }
@@ -76,15 +79,15 @@ fn main() -> eyre::Result<()> {
 
     let tt = TextGenerator {
         model,
-        max_new_tokens: 20,
+        max_new_tokens: 25,
         context_length: cfg.context_length,
         eos_id: None,
         temperature: Some(0.1_f64),
         top_k: Some(50_usize),
     };
 
-    // let out = model.generate_text_simple(ids, 20, cfg.context_length, false)?;
     let out = tt.generate(&mut rng(), ids, false)?;
+
     let text = tokenizer.token_ids_to_text(&out)?;
 
     println!("{text}");

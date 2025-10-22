@@ -16,7 +16,7 @@ pub struct GPTModel {
     pub drop_emb: Dropout,
     pub trf_blocks: Vec<TransformerBlock>,
     pub final_norm: LayerNorm,
-    // pub out_head: Linear,
+    pub out_head: Linear,
 }
 
 impl GPTModel {
@@ -27,20 +27,19 @@ impl GPTModel {
         let vbh = vb.pp("h");
         let mut trf_blocks = Vec::with_capacity(c.num_trf);
         for i in 0..c.num_trf {
-            let vbhi = vbh.pp(i);
-            trf_blocks.push(TransformerBlock::from_config(&vbhi, c)?)
+            trf_blocks.push(TransformerBlock::from_config(&vbh.pp(i), c)?)
         }
-        // let final_norm = CustomLayerNorm::new(vb, c.emb_dim)?;
 
         let final_norm = layer_norm(c.emb_dim, LayerNormConfig::default(), vb.pp("ln_f"))?;
-        // let out_head = linear_b(c.emb_dim, c.vocab_size, c.bias, vb.pp("out_head"))?;
+
+        let out_head = linear_b(c.emb_dim, c.vocab_size, false, vb.pp("out_head"))?;
         let out = Self {
             tok_emb,
             pos_emb,
             drop_emb,
             trf_blocks,
             final_norm,
-            // out_head,
+            out_head,
         };
         Ok(out)
     }
@@ -85,6 +84,7 @@ impl ModuleT for GPTModel {
         let pos_emb = self.pos_emb.embeddings().index_select(&pos_ids, 0)?;
 
         let x = tok_emb.broadcast_add(&pos_emb)?;
+
         let mut x = self.drop_emb.forward_t(&x, train)?;
 
         for t in &self.trf_blocks {
@@ -92,7 +92,9 @@ impl ModuleT for GPTModel {
         }
 
         let logits = self.final_norm.forward_t(&x, train)?;
-        // let logits = self.out_head.forward_t(&logits, train)?;
+
+        let logits = self.out_head.forward_t(&logits, train)?;
+
         Ok(logits)
     }
 }

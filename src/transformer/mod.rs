@@ -22,9 +22,8 @@ impl TransformerBlock {
         drop_p: f32,
     ) -> candle_core::Result<Self> {
         let norm_1 = layer_norm(emb_dim, LayerNormConfig::default(), vbhi.pp("ln_1"))?;
-        let vbhiattn = vbhi.pp("attn");
         let multi_head = MultiHeadAttention::new(
-            &vbhiattn,
+            &vbhi.pp("attn"),
             num_heads,
             emb_dim,
             emb_dim / num_heads,
@@ -33,9 +32,7 @@ impl TransformerBlock {
         )?;
 
         let norm_2 = layer_norm(emb_dim, LayerNormConfig::default(), vbhi.pp("ln_2"))?;
-
-        let vbhimlp = vbhi.pp("mlp");
-        let feed_forward = FeedForward::new(&vbhimlp, emb_dim, bias)?;
+        let feed_forward = FeedForward::new(&vbhi.pp("mlp"), emb_dim, bias)?;
         let dropout = Dropout::new(drop_p);
         let out = Self {
             norm_1,
@@ -57,9 +54,8 @@ impl ModuleT for TransformerBlock {
         let shortcut_1 = xs;
         let x = self.norm_1.forward_t(xs, train)?;
 
-        println!("LN1 DIMSSS {:?}", x.dims());
-
         let x = self.multi_head.forward_t(&x, train)?;
+
         let x = self.dropout.forward_t(&x, train)?;
 
         let x = (x + shortcut_1)?; // shortcut connection

@@ -22,6 +22,7 @@ impl MultiHeadAttention {
         drop_p: f32,
     ) -> candle_core::Result<Self> {
         let d_k = num_heads * head_dim; // total columns of weight matrix
+
         let w_q = linear_b(emb_vec_size, d_k, bias, vb.pp("query"))?; // TODO: Need to decompose from c_attn
         let w_k = linear_b(emb_vec_size, d_k, bias, vb.pp("key"))?; // TODO: Need to decompose from c_attn
         let w_v = linear_b(emb_vec_size, d_k, bias, vb.pp("value"))?; // TODO: Need to decompose from c_attn
@@ -71,9 +72,6 @@ impl ModuleT for MultiHeadAttention {
     fn forward_t(&self, xs: &Tensor, train: bool) -> candle_core::Result<Tensor> {
         let (num_batches, emb_vec_size, _) = xs.dims3()?;
 
-        println!("WK DIMS: {:?}", self.w_q.weight().dims());
-        println!("WK STRIDE: {:?}", self.w_q.weight().stride());
-        println!("WK CONTIGUOUS: {}", self.w_q.weight().is_contiguous());
         let queries = self.w_q.forward_t(xs, train)?;
         let keys = self.w_k.forward_t(xs, train)?;
         let values = self.w_v.forward_t(xs, train)?;

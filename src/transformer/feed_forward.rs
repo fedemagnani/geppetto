@@ -24,6 +24,7 @@ pub struct FeedForward {
 impl FeedForward {
     pub fn new(vb: &VarBuilder, emb_size: usize, bias: bool) -> candle_core::Result<Self> {
         let linear_1 = linear_b(emb_size, 4 * emb_size, bias, vb.pp("c_fc"))?;
+
         let linear_2 = linear_b(4 * emb_size, emb_size, bias, vb.pp("c_proj"))?;
 
         let out = Self {

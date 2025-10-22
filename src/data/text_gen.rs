@@ -49,6 +49,7 @@ impl TextGenerator {
         };
 
         let (top_logits, _top_pos) = logits.contiguous()?.topk_last_dim1(top_k)?;
+
         let mask = logits.broadcast_lt(&top_logits.min_keepdim(D::Minus1)?)?;
         let on_true = logits
             .ones_like()?
