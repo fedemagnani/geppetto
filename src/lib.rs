@@ -18,6 +18,7 @@ use rand::seq::SliceRandom;
 use std::f64;
 use std::{fs, path::Path};
 use tiktoken_rs::CoreBPE;
+use tiktoken_rs::get_bpe_from_model;
 
 mod tokenizer;
 pub use tokenizer::*;

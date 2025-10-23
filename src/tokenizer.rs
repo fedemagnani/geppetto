@@ -30,4 +30,10 @@ impl Tokenizer {
             .map_err(|e| eyre!(e))?;
         Ok(out)
     }
+
+    pub fn gpt2() -> eyre::Result<Self> {
+        let out = get_bpe_from_model("gpt2").map_err(|e| eyre!("{e}"))?;
+        let out = Self::from(out);
+        Ok(out)
+    }
 }
