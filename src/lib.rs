@@ -7,14 +7,15 @@ use candle_nn::{
     AdamW, Dropout, Embedding, Linear, ModuleT, Optimizer, VarBuilder, embedding, linear_b,
 };
 use candle_nn::{LayerNormConfig, layer_norm};
-
 use core::f32;
+use eyre::ContextCompat;
 use eyre::eyre;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 use rand::rng;
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
+use std::collections::HashMap;
 use std::f64;
 use std::{fs, path::Path};
 use tiktoken_rs::CoreBPE;
