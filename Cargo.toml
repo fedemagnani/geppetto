@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.12.1"
+clap = { version = "4.6.1", features = ["derive"] }
+memmap2 = "0.9"
+strum = { version = "0.28.0", features = ["derive"] }
+thiserror = "2"
+
+[[bin]]
+name = "gguf-inspect"
+path = "src/bin/gguf_inspect.rs"
