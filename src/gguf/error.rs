@@ -57,4 +57,14 @@ pub enum GgufError {
         expected: &'static str,
         found: ValueType,
     },
+    #[error(
+        "tensor '{name}' has shape [{got_rows}, {got_cols}], expected [{want_rows}, {want_cols}]"
+    )]
+    ShapeMismatch {
+        name: String,
+        got_rows: usize,
+        got_cols: usize,
+        want_rows: usize,
+        want_cols: usize,
+    },
 }

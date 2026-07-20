@@ -1,5 +1,5 @@
 use crate::gguf::GgufError;
-use crate::tensor::{DType, row_size};
+use crate::tensor::{DType, Shape, row_size};
 
 /// Mirrors `GGML_MAX_DIMS`.
 pub const MAX_DIMS: usize = 4;
@@ -71,5 +71,15 @@ impl TensorInfo {
         )
         .ok()?;
         u64::try_from(row).ok()?.checked_mul(n_rows)
+    }
+
+    /// A GGUF tensor's `[rows, cols]` in `Tensor` terms: `dims[0]` is the contiguous
+    /// row length (`cols`), the remaining dims form the row count. GPT-2 tensors are
+    /// 1D or 2D, so this is `1` or `dims[1]` rows.
+    pub fn dims_to_shape(&self) -> Shape {
+        let cols = self.dims.first().copied().unwrap_or(1) as usize;
+        let rows = self.dims.iter().skip(1).product::<u64>() as usize;
+
+        Shape::new(rows, cols)
     }
 }

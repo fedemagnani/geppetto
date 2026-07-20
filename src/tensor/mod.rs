@@ -9,12 +9,12 @@
 mod activation;
 mod dtype;
 mod error;
-mod layer;
+pub mod layer;
 mod ops;
 mod shape;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use dtype::DType;
 pub use error::TensorError;

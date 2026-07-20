@@ -10,7 +10,7 @@ mod tensor_info;
 mod value;
 
 #[cfg(test)]
-mod test;
+pub(crate) mod test;
 
 pub use error::GgufError;
 pub use reader::{GgufFile, MetadataTable, TensorTable};

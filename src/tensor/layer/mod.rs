@@ -6,3 +6,5 @@
 
 mod get_rows;
 mod layernorm;
+
+pub use layernorm::LayerNorm;

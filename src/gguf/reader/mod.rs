@@ -6,9 +6,12 @@ use std::path::Path;
 
 use bytes::Bytes;
 
-use crate::gguf::{
-    ArrayValue, GgufError, MAGIC, MAX_ARRAY_ELEMENTS, MAX_DIMS, MAX_NAME_LEN, TensorInfo, Value,
-    ValueType,
+use crate::{
+    gguf::{
+        ArrayValue, GgufError, MAGIC, MAX_ARRAY_ELEMENTS, MAX_DIMS, MAX_NAME_LEN, TensorInfo,
+        Value, ValueType,
+    },
+    tensor::Tensor,
 };
 
 /// A parsed GGUF file. Metadata and tensor infos are read eagerly; tensor
@@ -166,6 +169,66 @@ impl GgufFile {
             return Err(oob(name));
         }
         Ok(self.data.slice(start..end))
+    }
+
+    /// TODO: possibly redundant with `tensor_data`
+    pub fn tensor_from(&self, name: &str) -> Result<Tensor, GgufError> {
+        let info = self
+            .tensor(name)
+            .ok_or_else(|| GgufError::TensorNotFound(name.into()))?;
+        let dtype = info
+            .dtype()
+            .ok_or_else(|| GgufError::UnsupportedTensorType {
+                name: name.into(),
+                type_id: info.type_id,
+            })?;
+        let shape = info.dims_to_shape();
+        let bytes = self.tensor_data(name)?;
+        let tensor = Tensor::from_bytes(dtype, shape, bytes.as_ref())?;
+
+        Ok(tensor)
+    }
+
+    /// Loads a tensor and checks it is exactly `[rows, cols]`.
+    pub fn load(
+        &self,
+        name: &str,
+        want_rows: usize,
+        want_cols: usize,
+    ) -> Result<Tensor, GgufError> {
+        let tensor = self.tensor_from(name)?;
+        let got_rows = tensor.rows();
+        let got_cols = tensor.cols();
+        if got_rows != want_rows || got_cols != want_cols {
+            return Err(GgufError::ShapeMismatch {
+                name: name.into(),
+                got_rows,
+                got_cols,
+                want_rows,
+                want_cols,
+            });
+        }
+        Ok(tensor)
+    }
+
+    /// Loads a tensor checking only its row width, returning it with whatever row
+    /// count the file declares (used for `token_embd`, which fixes `n_vocab`).
+    ///
+    /// TODO: is this really needed? it is just `load` with more loosy checks
+    pub fn load_cols(&self, name: &str, want_cols: usize) -> Result<Tensor, GgufError> {
+        let tensor = self.tensor_from(name)?;
+        let got_rows = tensor.rows();
+        let got_cols = tensor.cols();
+        if got_cols != want_cols {
+            return Err(GgufError::ShapeMismatch {
+                name: name.into(),
+                got_rows,
+                got_cols,
+                want_rows: got_rows,
+                want_cols,
+            });
+        }
+        Ok(tensor)
     }
 }
 
