@@ -15,6 +15,7 @@ impl<'a> NormLayer<'a> {
     ///
     /// For each row `x`: `(x - mean) / sqrt(var + eps)`, then elementwise
     /// `* weight + bias`. `var` is the biased (population) variance.
+    #[hotpath::measure]
     pub fn forward(&self, input: &Tensor) -> Tensor {
         let cols = input.cols();
         assert_eq!(self.weight.rows(), 1, "layernorm: weight must be one row");

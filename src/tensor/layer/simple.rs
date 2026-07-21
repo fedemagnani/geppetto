@@ -10,6 +10,7 @@ impl<'a> SimpleLayer<'a> {
         Self { weight, bias }
     }
 
+    #[hotpath::measure]
     pub fn forward(&self, input: &Tensor) -> Tensor {
         (input * self.weight) + self.bias
     }

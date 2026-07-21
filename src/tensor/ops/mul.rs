@@ -23,6 +23,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 impl Mul<&Tensor> for &Tensor {
     type Output = Tensor;
 
+    #[hotpath::measure]
     fn mul(self, rhs: &Tensor) -> Tensor {
         let (m, k, n) = (self.rows(), self.cols(), rhs.rows());
         assert_eq!(
@@ -55,6 +56,7 @@ impl Mul<&Tensor> for &Tensor {
 /// buffer must grow once, and rows are filled back-to-front so a write never
 /// lands on a source row still to be read.
 impl MulAssign<&Tensor> for Tensor {
+    #[hotpath::measure]
     fn mul_assign(&mut self, rhs: &Tensor) {
         let (m, k, n) = (self.rows(), self.cols(), rhs.rows());
         assert_eq!(

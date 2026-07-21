@@ -47,6 +47,7 @@ impl Tokenizer {
     /// [`Self::encode`] appending to a caller-owned buffer, which is not
     /// cleared. Allocation-free beyond the buffer's own growth: each
     /// pre-token's byte ids are appended and BPE-merged in place on the tail.
+    #[hotpath::measure]
     pub fn encode_into(&self, text: &str, out: &mut Vec<TokenId>) -> Result<(), TokenizerError> {
         for piece in self.pretokenizer.split_iter(text) {
             let piece = piece?;

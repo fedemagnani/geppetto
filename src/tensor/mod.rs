@@ -67,6 +67,7 @@ impl Tensor {
 
     /// Builds a tensor from a GGUF tensor's raw bytes, dispatching on `dtype`.
     /// The byte count must match `shape` exactly for `dtype`.
+    #[hotpath::measure]
     pub fn from_bytes(dtype: DType, shape: Shape, bytes: &[u8]) -> Result<Tensor, TensorError> {
         let data = match dtype {
             DType::F32 => decode_f32(shape, bytes)?,

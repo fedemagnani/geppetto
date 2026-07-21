@@ -7,6 +7,7 @@ use crate::tensor::Tensor;
 /// the FFN and attention projections need. In place: `self`'s buffer is
 /// mutated, its shape unchanged.
 impl AddAssign<&Tensor> for Tensor {
+    #[hotpath::measure]
     fn add_assign(&mut self, rhs: &Tensor) {
         let broadcast = rhs.rows() == 1 && self.rows() != 1;
         assert_eq!(

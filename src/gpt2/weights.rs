@@ -40,6 +40,7 @@ pub struct Gpt2Weights {
 }
 
 impl Gpt2Weights {
+    #[hotpath::measure]
     pub fn from_gguf(file: &GgufFile, hp: &HParams) -> Result<Gpt2Weights, ModelError> {
         let e = hp.n_embd;
         let ff = hp.n_ff;

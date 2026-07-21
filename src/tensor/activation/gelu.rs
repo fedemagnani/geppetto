@@ -12,6 +12,7 @@ fn gelu_scalar(x: f32) -> f32 {
 impl Tensor {
     /// Elementwise GELU using the tanh approximation ggml applies to GPT-2's
     /// FFN.
+    #[hotpath::measure]
     pub fn gelu(&self) -> Tensor {
         let mut out = self.clone();
         for slot in out.data_mut() {

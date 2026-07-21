@@ -9,6 +9,7 @@ use crate::tensor::{Shape, Tensor};
 /// `0..=n_past + i`. Within a row the `n_head` heads occupy contiguous
 /// `head_dim` column blocks, matching the fused-QKV layout. Returns
 /// `[n_q, n_embd]`.
+#[hotpath::measure]
 pub fn multi_head_attention(
     q: &[f32],
     k: &[f32],
@@ -47,6 +48,7 @@ pub fn multi_head_attention(
 }
 
 /// `[n_q, n_kv]` additive mask: `0` where a query may attend, `-inf` otherwise.
+#[hotpath::measure]
 fn causal_mask(n_q: usize, n_kv: usize, n_past: usize) -> Tensor {
     let mut mask = vec![0.0f32; n_q * n_kv];
     for i in 0..n_q {
@@ -58,6 +60,7 @@ fn causal_mask(n_q: usize, n_kv: usize, n_past: usize) -> Tensor {
 }
 
 /// Head `[off, off + head_dim)` of every row: `[rows, head_dim]`.
+#[hotpath::measure]
 fn gather_head(src: &[f32], rows: usize, n_embd: usize, off: usize, head_dim: usize) -> Tensor {
     let mut out = vec![0.0f32; rows * head_dim];
     for r in 0..rows {
@@ -69,6 +72,7 @@ fn gather_head(src: &[f32], rows: usize, n_embd: usize, off: usize, head_dim: us
 
 /// Head `[off, off + head_dim)` transposed to `[head_dim, rows]`, so the V
 /// multiply can use the `self @ rhs^T` operator.
+#[hotpath::measure]
 fn gather_head_transposed(
     src: &[f32],
     rows: usize,

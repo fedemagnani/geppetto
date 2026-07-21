@@ -30,6 +30,7 @@ pub struct Sampler {
 
 impl Sampler {
     /// Samples one token from a row of logits, one entry per vocab id.
+    #[hotpath::measure]
     pub fn sample(&mut self, logits: &[f32]) -> Result<TokenId, SamplingError> {
         self.candidates.reset_from_logits(logits)?;
         for filter in &self.filters {

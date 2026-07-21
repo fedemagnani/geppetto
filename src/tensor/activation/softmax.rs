@@ -5,6 +5,7 @@ impl Tensor {
     /// before exponentiating. When `mask` is given (same shape as `self`) it
     /// is added first -- the additive attention mask, whose `-inf` entries
     /// zero out disallowed positions.
+    #[hotpath::measure]
     pub fn softmax(&self, mask: Option<&Tensor>) -> Tensor {
         if let Some(mask) = mask {
             assert_eq!(mask.shape(), self.shape(), "softmax: mask shape must match");

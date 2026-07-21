@@ -27,6 +27,7 @@ pub struct GgufFile {
 }
 
 impl GgufFile {
+    #[hotpath::measure]
     pub fn open(path: impl AsRef<Path>) -> Result<GgufFile, GgufError> {
         let file = std::fs::File::open(path)?;
         // SAFETY: the map is read-only and geppetto never mutates model files;

@@ -5,6 +5,7 @@ impl Tensor {
     /// `[ids.len(), cols]`. This is `ggml_get_rows`: the embedding lookup that
     /// turns token ids into rows of the embedding table, and also how the graph
     /// selects the output positions to keep.
+    #[hotpath::measure]
     pub fn get_rows(&self, ids: &[u32]) -> Tensor {
         let cols = self.cols();
         let n_rows = self.rows();

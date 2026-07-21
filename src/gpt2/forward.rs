@@ -9,6 +9,7 @@ impl Gpt2Model {
     /// positions, appending their keys and values, and returns the logits
     /// `[tokens.len(), n_vocab]` (one row per new position). Mirrors the graph
     /// in `src/models/gpt2.cpp`.
+    #[hotpath::measure]
     pub fn forward(&self, cache: &mut KvCache, tokens: &[u32]) -> Result<Tensor, ModelError> {
         let hp = self.hparams();
         let w = self.weights();
@@ -109,6 +110,7 @@ impl Gpt2Model {
 /// Splits a fused QKV activation `[n, 3*n_embd]` into Q, K, V, each
 /// `[n, n_embd]`, from the contiguous column blocks `[0, n_embd)`,
 /// `[n_embd, 2*n_embd)`, `[2*n_embd, 3*n_embd)`.
+#[hotpath::measure]
 fn split_qkv(qkv: &Tensor, n_embd: usize) -> (Tensor, Tensor, Tensor) {
     let n = qkv.rows();
     let mut q = vec![0.0f32; n * n_embd];
