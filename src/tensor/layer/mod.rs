@@ -5,6 +5,8 @@
 //! there is nothing to re-export.
 
 mod get_rows;
-mod layernorm;
+mod norm;
+mod simple;
 
-pub use layernorm::LayerNorm;
+pub use norm::NormLayer;
+pub use simple::SimpleLayer;

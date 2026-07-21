@@ -1,7 +1,7 @@
 use crate::gpt2::attention::multi_head_attention;
 use crate::gpt2::{Gpt2Model, ModelError};
 use crate::kv_cache::KvCache;
-use crate::tensor::layer::LayerNorm;
+use crate::tensor::layer::{NormLayer, SimpleLayer};
 use crate::tensor::{Shape, Tensor};
 
 impl Gpt2Model {
@@ -55,7 +55,7 @@ impl Gpt2Model {
         for (il, layer) in w.layers.iter().enumerate() {
             /////////////////////////////
             // Normalization layer
-            let layer_norm = LayerNorm::new(&layer.attn_norm_w, &layer.attn_norm_b, hp.eps);
+            let layer_norm = NormLayer::new(&layer.attn_norm_w, &layer.attn_norm_b, hp.eps);
             let normed = layer_norm.eval(&inp);
 
             /////////////////////////////
@@ -75,7 +75,9 @@ impl Gpt2Model {
                 hp.n_head,
                 head_dim,
             );
-            let attn = (&attn * &layer.attn_out_w) + &layer.attn_out_b;
+
+            let attn_simple = SimpleLayer::new(&layer.attn_out_w, &layer.attn_out_b);
+            let attn = attn_simple.eval(&attn);
 
             /////////////////////////////
             // Residual connections
@@ -83,11 +85,12 @@ impl Gpt2Model {
 
             /////////////////////////////
             // Feed-Forward layer
-            let ff_layer_norm = LayerNorm::new(&layer.ffn_norm_w, &layer.ffn_norm_b, hp.eps);
-            let ff = ff_layer_norm.eval(&ffn_inp);
-            let ff = (&ff * &layer.ffn_up_w) + &layer.ffn_up_b;
-            let ff = ff.gelu();
-            let ff = (&ff * &layer.ffn_down_w) + &layer.ffn_down_b;
+            let ff_norm = NormLayer::new(&layer.ffn_norm_w, &layer.ffn_norm_b, hp.eps);
+            let ff_simple_up = SimpleLayer::new(&layer.ffn_up_w, &layer.ffn_up_b);
+            let ff_simple_down = SimpleLayer::new(&layer.ffn_down_w, &layer.ffn_down_b);
+            let ff_layer = FeedForwardLayer::new(ff_norm, ff_simple_up, ff_simple_down);
+
+            let ff = ff_layer.eval(&ffn_inp);
 
             /////////////////////////////
             // Residual connections
@@ -96,7 +99,7 @@ impl Gpt2Model {
 
         /////////////////////////////
         // Normalization layer
-        let out_layer_norm = LayerNorm::new(&w.output_norm_w, &w.output_norm_b, hp.eps);
+        let out_layer_norm = NormLayer::new(&w.output_norm_w, &w.output_norm_b, hp.eps);
         let normed = out_layer_norm.eval(&inp);
 
         Ok(&normed * &w.output) // [n_new, n_vocab]
@@ -124,4 +127,31 @@ fn split_qkv(qkv: &Tensor, n_embd: usize) -> (Tensor, Tensor, Tensor) {
         Tensor::new(shape, k),
         Tensor::new(shape, v),
     )
+}
+
+struct FeedForwardLayer<'a> {
+    norm: NormLayer<'a>,
+    simple_up: SimpleLayer<'a>,
+    simple_down: SimpleLayer<'a>,
+}
+
+impl<'a> FeedForwardLayer<'a> {
+    pub fn new(
+        norm: NormLayer<'a>,
+        simple_up: SimpleLayer<'a>,
+        simple_down: SimpleLayer<'a>,
+    ) -> Self {
+        Self {
+            norm,
+            simple_up,
+            simple_down,
+        }
+    }
+
+    pub fn eval(&self, input: &Tensor) -> Tensor {
+        let ff = self.norm.eval(input);
+        let ff = self.simple_up.eval(&ff);
+        let ff = ff.gelu();
+        self.simple_down.eval(&ff)
+    }
 }

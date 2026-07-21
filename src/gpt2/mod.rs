@@ -15,7 +15,7 @@ mod test;
 
 pub use error::ModelError;
 pub use hparams::HParams;
-pub use weights::{Gpt2Transformer, Gpt2Weights};
+pub use weights::{Gpt2TransformerWeights, Gpt2Weights};
 
 use crate::gguf::GgufFile;
 use crate::kv_cache::KvCache;

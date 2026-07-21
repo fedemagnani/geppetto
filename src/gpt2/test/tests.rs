@@ -114,7 +114,7 @@ fn missing_tensor_is_a_typed_error() {
     let file = GgufFile::from_bytes(top_level_only_gguf(TinyConfig::small())).unwrap();
     assert!(matches!(
         Gpt2Model::from_gguf(&file),
-        Err(ModelError::MissingTensor(name)) if name == "blk.0.attn_norm.weight"
+        Err(ModelError::Gguf(crate::gguf::GgufError::TensorNotFound(name))) if name == "blk.0.attn_norm.weight"
     ));
 }
 

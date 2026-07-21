@@ -1,9 +1,0 @@
-- answer the TODOs spread around `geppetto` repo
-- I thought that the dimension of each query, key, value weight matrix was: embedding dimension as number of rows and a specific dimension `d` as number of columns (which should be equal between the query and key weight matrices to compute the attention scores). However, when initializing `attn_qkv_w` in `geppetto/src/gpt2/weights.rs` it looks like the number of expected rows is `3 * embedding dimension` and the number of columns is `embdedding dimension`: is it because these three matrices are stacked one above the other? Moreover, shall we assume that the number of columns (`d`) is equal to the embedding dimension for all the weight matrices?
-- We should define some structs so that we can unpack the `Gpt2Transformer` block (which should become an orchestrator over these components): I think that this would simplify also the evaluation of the model since it will delegate some logics to the Transformer and wrapped components in `geppetto/src/gpt2/forward.rs`.
-- Currently the `Tensor` model is quite "heavy":
-  - in `gguf` we are using the `Mmap` strategy with the goal of recycling the kernel page cache in memory, without doubling the ram impact by copying the weights and hparams into anonymous memory as well. However, when constructing the tensor, are we effectively causing the copying into anonymous memory?
-  - a lot of "intermediate" tensors are causing an allocation (see in `geppetto/src/gpt2/forward.rs` when applying positional encodings to the input embeddings)
-- Instead of defining `layernorm` as method of the tensor, we should instead mount a view on `weight`, `bias` and `eps` so that we can encapsulate there the normalization logic and modify in place the input
-- what is the purpose of caching key and value matrices if we always recompute them?
-- currently, the tensor is a matrix representation (just two dimensions in shape): is the same behavior experienced in llama.cpp as well?

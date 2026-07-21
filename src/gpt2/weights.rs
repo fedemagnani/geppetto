@@ -5,7 +5,7 @@ use crate::tensor::Tensor;
 /// The weights of one transformer block, all converted to f32 tensors. Linear
 /// weights are `[n_out, n_in]` (the ggml convention `Tensor`'s `*` expects);
 /// norm weights and biases are single rows.
-pub struct Gpt2Transformer {
+pub struct Gpt2TransformerWeights {
     pub attn_norm_w: Tensor,
     pub attn_norm_b: Tensor,
     pub attn_qkv_w: Tensor,
@@ -36,7 +36,7 @@ pub struct Gpt2Weights {
     /// a discrete probability distribution to pick the next predicted token
     pub output: Tensor,
     /// The transformer blocks used to transform embedding vectors
-    pub layers: Vec<Gpt2Transformer>,
+    pub layers: Vec<Gpt2TransformerWeights>,
 }
 
 impl Gpt2Weights {
@@ -61,7 +61,7 @@ impl Gpt2Weights {
         let mut layers = Vec::with_capacity(hp.n_layer);
         for il in 0..hp.n_layer {
             let name = |suffix: &str| format!("blk.{il}.{suffix}");
-            layers.push(Gpt2Transformer {
+            layers.push(Gpt2TransformerWeights {
                 attn_norm_w: file.load(&name("attn_norm.weight"), 1, e)?,
                 attn_norm_b: file.load(&name("attn_norm.bias"), 1, e)?,
                 // the query, key, value weight matrices are stacked one above the other

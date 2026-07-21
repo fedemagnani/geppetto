@@ -11,10 +11,6 @@ pub enum ModelError {
     UnsupportedArch(String),
     #[error("invalid hyperparameters: {0}")]
     InvalidHParams(String),
-    #[error("missing tensor '{0}'")]
-    MissingTensor(String),
-    #[error("tensor '{name}' has unsupported ggml type id {type_id}")]
-    UnsupportedTensorType { name: String, type_id: u32 },
     #[error("token id {token} is out of range for a vocab of {n_vocab}")]
     TokenOutOfRange { token: u32, n_vocab: usize },
     #[error("context overflow: {n_past} cached + {n_new} new exceeds n_ctx {n_ctx}")]

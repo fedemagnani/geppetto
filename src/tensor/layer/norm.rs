@@ -1,12 +1,12 @@
 use crate::tensor::Tensor;
 
-pub struct LayerNorm<'a> {
+pub struct NormLayer<'a> {
     weight: &'a Tensor,
     bias: &'a Tensor,
     eps: f32,
 }
 
-impl<'a> LayerNorm<'a> {
+impl<'a> NormLayer<'a> {
     pub fn new(weight: &'a Tensor, bias: &'a Tensor, eps: f32) -> Self {
         Self { weight, bias, eps }
     }
@@ -37,7 +37,7 @@ impl<'a> LayerNorm<'a> {
 }
 #[cfg(test)]
 mod tests {
-    use crate::tensor::{Shape, Tensor, layer::layernorm::LayerNorm};
+    use crate::tensor::{Shape, Tensor, layer::norm::NormLayer};
 
     fn ones(cols: usize) -> Tensor {
         Tensor::new(Shape::new(1, cols), vec![1.0; cols])
@@ -53,7 +53,7 @@ mod tests {
         let w = ones(4);
         let b = zeros(4);
         let eps = 0.;
-        let norm = LayerNorm::new(&w, &b, eps);
+        let norm = NormLayer::new(&w, &b, eps);
         let out = norm.eval(&x);
         // mean 2.5, population var 1.25, std ~1.118034
         let expected = [-1.341_641, -0.447_214, 0.447_214, 1.341_641];
@@ -72,7 +72,7 @@ mod tests {
         let w = ones(5);
         let b = zeros(5);
         let eps = 1e-9;
-        let norm = LayerNorm::new(&w, &b, eps);
+        let norm = NormLayer::new(&w, &b, eps);
         let out = norm.eval(&x);
 
         for row in out.data().chunks(5) {
@@ -89,7 +89,7 @@ mod tests {
         let w = Tensor::new(Shape::new(1, 2), vec![2.0, 3.0]);
         let b = Tensor::new(Shape::new(1, 2), vec![10.0, -10.0]);
         let eps = 0.;
-        let norm = LayerNorm::new(&w, &b, eps);
+        let norm = NormLayer::new(&w, &b, eps);
         let out = norm.eval(&x);
         // normalized [-1, 1] -> *[2,3] + [10,-10] = [8, -7]
         assert!((out.data()[0] - 8.0).abs() < 1e-5);
