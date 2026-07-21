@@ -15,7 +15,7 @@ impl<'a> NormLayer<'a> {
     ///
     /// For each row `x`: `(x - mean) / sqrt(var + eps)`, then elementwise
     /// `* weight + bias`. `var` is the biased (population) variance.
-    pub fn eval(&self, input: &Tensor) -> Tensor {
+    pub fn forward(&self, input: &Tensor) -> Tensor {
         let cols = input.cols();
         assert_eq!(self.weight.rows(), 1, "layernorm: weight must be one row");
         assert_eq!(self.bias.rows(), 1, "layernorm: bias must be one row");
@@ -54,7 +54,7 @@ mod tests {
         let b = zeros(4);
         let eps = 0.;
         let norm = NormLayer::new(&w, &b, eps);
-        let out = norm.eval(&x);
+        let out = norm.forward(&x);
         // mean 2.5, population var 1.25, std ~1.118034
         let expected = [-1.341_641, -0.447_214, 0.447_214, 1.341_641];
         for (o, e) in out.data().iter().zip(expected) {
@@ -73,7 +73,7 @@ mod tests {
         let b = zeros(5);
         let eps = 1e-9;
         let norm = NormLayer::new(&w, &b, eps);
-        let out = norm.eval(&x);
+        let out = norm.forward(&x);
 
         for row in out.data().chunks(5) {
             let mean = row.iter().sum::<f32>() / 5.0;
@@ -90,7 +90,7 @@ mod tests {
         let b = Tensor::new(Shape::new(1, 2), vec![10.0, -10.0]);
         let eps = 0.;
         let norm = NormLayer::new(&w, &b, eps);
-        let out = norm.eval(&x);
+        let out = norm.forward(&x);
         // normalized [-1, 1] -> *[2,3] + [10,-10] = [8, -7]
         assert!((out.data()[0] - 8.0).abs() < 1e-5);
         assert!((out.data()[1] - -7.0).abs() < 1e-5);

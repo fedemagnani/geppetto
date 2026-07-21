@@ -19,3 +19,7 @@ path = "src/bin/gguf_inspect.rs"
 [[bin]]
 name = "tokenize"
 path = "src/bin/tokenize.rs"
+
+[[bin]]
+name = "generate"
+path = "src/bin/generate.rs"

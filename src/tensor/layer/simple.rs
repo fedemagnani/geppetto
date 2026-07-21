@@ -10,7 +10,7 @@ impl<'a> SimpleLayer<'a> {
         Self { weight, bias }
     }
 
-    pub fn eval(&self, input: &Tensor) -> Tensor {
+    pub fn forward(&self, input: &Tensor) -> Tensor {
         (input * self.weight) + self.bias
     }
 }

@@ -2,4 +2,5 @@
 //! through the epoch-1 GGUF writer, and the behavioral test suite.
 
 mod tests;
-mod tiny;
+/// Visible crate-wide: the generation tests drive this same tiny model.
+pub(crate) mod tiny;

@@ -56,7 +56,7 @@ impl Gpt2Model {
             /////////////////////////////
             // Normalization layer
             let layer_norm = NormLayer::new(&layer.attn_norm_w, &layer.attn_norm_b, hp.eps);
-            let normed = layer_norm.eval(&inp);
+            let normed = layer_norm.forward(&inp);
 
             /////////////////////////////
             // Q,K,V computation
@@ -77,7 +77,7 @@ impl Gpt2Model {
             );
 
             let attn_simple = SimpleLayer::new(&layer.attn_out_w, &layer.attn_out_b);
-            let attn = attn_simple.eval(&attn);
+            let attn = attn_simple.forward(&attn);
 
             /////////////////////////////
             // Residual connections
@@ -90,7 +90,7 @@ impl Gpt2Model {
             let ff_simple_down = SimpleLayer::new(&layer.ffn_down_w, &layer.ffn_down_b);
             let ff_layer = FeedForwardLayer::new(ff_norm, ff_simple_up, ff_simple_down);
 
-            let ff = ff_layer.eval(&ffn_inp);
+            let ff = ff_layer.forward(&ffn_inp);
 
             /////////////////////////////
             // Residual connections
@@ -100,7 +100,7 @@ impl Gpt2Model {
         /////////////////////////////
         // Normalization layer
         let out_layer_norm = NormLayer::new(&w.output_norm_w, &w.output_norm_b, hp.eps);
-        let normed = out_layer_norm.eval(&inp);
+        let normed = out_layer_norm.forward(&inp);
 
         Ok(&normed * &w.output) // [n_new, n_vocab]
     }
@@ -148,10 +148,10 @@ impl<'a> FeedForwardLayer<'a> {
         }
     }
 
-    pub fn eval(&self, input: &Tensor) -> Tensor {
-        let ff = self.norm.eval(input);
-        let ff = self.simple_up.eval(&ff);
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let ff = self.norm.forward(input);
+        let ff = self.simple_up.forward(&ff);
         let ff = ff.gelu();
-        self.simple_down.eval(&ff)
+        self.simple_down.forward(&ff)
     }
 }

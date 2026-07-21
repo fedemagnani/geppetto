@@ -11,7 +11,7 @@ mod hparams;
 mod weights;
 
 #[cfg(test)]
-mod test;
+pub(crate) mod test;
 
 pub use error::ModelError;
 pub use hparams::HParams;
