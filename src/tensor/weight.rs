@@ -142,6 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn f16_widening_is_monotone_over_a_sweep() {
+        let bits: Vec<u16> = (0x0001u16..0x7C00).step_by(7).collect();
+        let raw: Vec<u8> = bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let shape = Shape::new(1, bits.len());
+        let w = WeightTensor::from_gguf_bytes(DType::F16, shape, Bytes::from(raw)).unwrap();
+        for pair in w.data().windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "not increasing: {} then {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
     fn unaligned_f32_bytes_fall_back_to_a_copy() {
         // slicing at 1 byte guarantees a misaligned f32 start
         let mut raw = vec![0u8];

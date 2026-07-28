@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::tensor::Tensor;
 use crate::tensor::{Shape, TensorView, TensorViewMut};
 
 /// Gathers rows `ids` from `table` (an `[n_rows, cols]` matrix) into `out`
@@ -22,40 +20,38 @@ pub fn get_rows(table: TensorView, ids: &[u32], mut out: TensorViewMut) {
 }
 
 #[cfg(test)]
-impl Tensor {
-    /// Gathers rows `ids` from `self` into a fresh tensor, delegating to
-    /// [`get_rows`].
-    pub fn get_rows(&self, ids: &[u32]) -> Tensor {
-        let mut out = Tensor::zeros(Shape::new(ids.len(), self.cols()));
-        get_rows(self.as_view(), ids, out.as_view_mut());
+mod tests {
+    use crate::tensor::layer::get_rows;
+    use crate::tensor::{Shape, TensorView, TensorViewMut};
+
+    fn gather(table: &[f32], rows: usize, cols: usize, ids: &[u32]) -> Vec<f32> {
+        let mut out = vec![0.0f32; ids.len() * cols];
+        get_rows(
+            TensorView::contiguous(table, Shape::new(rows, cols)),
+            ids,
+            TensorViewMut::contiguous(&mut out, Shape::new(ids.len(), cols)),
+        );
         out
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::tensor::{Shape, Tensor};
 
     #[test]
     fn selects_and_reorders_rows() {
-        let table = Tensor::new(Shape::new(3, 2), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
-        let out = table.get_rows(&[2, 0, 2]);
-        assert_eq!(out.shape(), Shape::new(3, 2));
-        assert_eq!(out.data(), &[4.0, 5.0, 0.0, 1.0, 4.0, 5.0]);
+        let table = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let out = gather(&table, 3, 2, &[2, 0, 2]);
+        assert_eq!(out, &[4.0, 5.0, 0.0, 1.0, 4.0, 5.0]);
     }
 
     #[test]
     fn empty_id_list_yields_no_rows() {
-        let table = Tensor::new(Shape::new(2, 2), vec![1.0, 2.0, 3.0, 4.0]);
-        let out = table.get_rows(&[]);
-        assert_eq!(out.shape(), Shape::new(0, 2));
-        assert!(out.data().is_empty());
+        let table = [1.0, 2.0, 3.0, 4.0];
+        let out = gather(&table, 2, 2, &[]);
+        assert!(out.is_empty());
     }
 
     #[test]
     #[should_panic(expected = "out of range")]
     fn out_of_range_id_panics() {
-        let table = Tensor::new(Shape::new(2, 2), vec![1.0, 2.0, 3.0, 4.0]);
-        let _ = table.get_rows(&[2]);
+        let table = [1.0, 2.0, 3.0, 4.0];
+        let _ = gather(&table, 2, 2, &[2]);
     }
 }

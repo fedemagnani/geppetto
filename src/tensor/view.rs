@@ -3,11 +3,8 @@
 //! `cols` elements whose starts sit `row_stride` apart. `row_stride == cols`
 //! is the contiguous common case; a larger stride mounts a column block of a
 //! wider buffer (one attention head of a fused QKV activation) without
-//! copying. Views never own or allocate: the data lives in a [`Tensor`], the
-//! arena, or the mmap'd weights, and a view is mounted just in time for each
-//! call.
-//!
-//! [`Tensor`]: crate::tensor::Tensor
+//! copying. Views never own or allocate: the data lives in the arena or the
+//! mmap'd weights, and a view is mounted just in time for each call.
 
 use crate::tensor::Shape;
 

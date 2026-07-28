@@ -1,10 +1,3 @@
-#[cfg(test)]
-use std::mem;
-#[cfg(test)]
-use std::ops::{Mul, MulAssign};
-
-#[cfg(test)]
-use crate::tensor::Tensor;
 use crate::tensor::{Shape, TensorView, TensorViewMut};
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -100,94 +93,43 @@ pub fn matmul_nn_causal(a: TensorView, b: TensorView, mut out: TensorViewMut, n_
     }
 }
 
-/// The [`matmul`] weight convention, exposed as `*` on owned tensors:
-/// allocates the `[m, n]` output and delegates.
-#[cfg(test)]
-impl Mul<&Tensor> for &Tensor {
-    type Output = Tensor;
-
-    fn mul(self, rhs: &Tensor) -> Tensor {
-        let mut out = Tensor::zeros(Shape::new(self.rows(), rhs.rows()));
-        matmul(self.as_view(), rhs.as_view(), out.as_view_mut());
-        out
-    }
-}
-
-/// `self *= rhs` computes `self * rhs` (the same convention as [`Mul`]) into
-/// `self`'s own buffer, avoiding the fresh `[m, n]` allocation the borrowing
-/// `*` makes.
-///
-/// One output row `[m, n]` moves through a reused `n`-wide scratch, because a
-/// row's dest slice overlaps its source slice whenever `n != k`. When
-/// `n <= k` the product fits in the existing buffer, so no reallocation
-/// happens (the common shrink is the FFN-down projection); when `n > k` the
-/// buffer must grow once, and rows are filled back-to-front so a write never
-/// lands on a source row still to be read.
-#[cfg(test)]
-impl MulAssign<&Tensor> for Tensor {
-    fn mul_assign(&mut self, rhs: &Tensor) {
-        let (m, k, n) = (self.rows(), self.cols(), rhs.rows());
-        assert_eq!(
-            k,
-            rhs.cols(),
-            "matmul: contracted dim mismatch, {} vs {}",
-            self.shape(),
-            rhs.shape(),
-        );
-
-        // own the buffer (mem::take leaves an empty Vec, no allocation) so a
-        // row's source read and dest write are plain sequential borrows
-        let mut data = mem::take(&mut self.data);
-        let mut scratch = vec![0.0f32; n];
-
-        let mut fill_row = |data: &mut [f32], i: usize| {
-            for (j, slot) in scratch.iter_mut().enumerate() {
-                *slot = dot(&data[i * k..i * k + k], rhs.row(j));
-            }
-            data[i * n..i * n + n].copy_from_slice(&scratch);
-        };
-
-        if n > k {
-            data.resize(m * n, 0.0);
-            for i in (0..m).rev() {
-                fill_row(&mut data, i);
-            }
-        } else {
-            for i in 0..m {
-                fill_row(&mut data, i);
-            }
-            data.truncate(m * n);
-        }
-
-        self.data = data;
-        self.shape = Shape::new(m, n);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::tensor::test_support::{Rng, assert_close, naive_matmul};
-    use crate::tensor::{Shape, Tensor, TensorView, matmul, matmul_nn, matmul_nn_causal};
+    use crate::tensor::{Shape, TensorView, TensorViewMut, matmul, matmul_nn, matmul_nn_causal};
+
+    /// `a [m, k] @ b^T [n, k]` through the driver, into a fresh buffer.
+    fn matmul_vec(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        matmul(
+            TensorView::contiguous(a, Shape::new(m, k)),
+            TensorView::contiguous(b, Shape::new(n, k)),
+            TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
+        );
+        out
+    }
 
     #[test]
     fn hand_computed_pins_the_convention() {
         // input: 2 tokens x 3 features
-        let input = Tensor::new(Shape::new(2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         // weight: 2 outputs, each 3 input weights
-        let weight = Tensor::new(Shape::new(2, 3), vec![1.0, 0.0, -1.0, 1.0, 1.0, 1.0]);
-        let out = &input * &weight;
-        assert_eq!(out.shape(), Shape::new(2, 2));
+        let weight = [1.0, 0.0, -1.0, 1.0, 1.0, 1.0];
         // out[t, o] = dot(input[t], weight[o])
-        assert_eq!(out.data(), &[-2.0, 6.0, -2.0, 15.0]);
+        assert_eq!(
+            matmul_vec(&input, &weight, 2, 3, 2),
+            &[-2.0, 6.0, -2.0, 15.0]
+        );
     }
 
     #[test]
     fn agrees_with_naive_reference_on_random_shapes() {
         let mut rng = Rng::new(0xA11CE);
         for &(m, k, n) in &[(1, 1, 1), (3, 4, 2), (5, 5, 5), (2, 7, 3), (8, 1, 4)] {
-            let input = rng.tensor(m, k, 3.0);
-            let weight = rng.tensor(n, k, 3.0);
-            assert_close(&(&input * &weight), &naive_matmul(&input, &weight), 1e-4);
+            let input = rng.vec(m * k, 3.0);
+            let weight = rng.vec(n * k, 3.0);
+            let got = matmul_vec(&input, &weight, m, k, n);
+            assert_close(&got, &naive_matmul(&input, &weight, m, k, n), 1e-4);
         }
     }
 
@@ -196,51 +138,58 @@ mod tests {
         // a [2, 6] fused activation; its width-2 block at column 2 used as
         // the matmul input, once via a strided view, once via a copy
         let mut rng = Rng::new(0xFACE);
-        let fused = rng.tensor(2, 6, 2.0);
-        let weight = rng.tensor(3, 2, 2.0);
+        let fused = rng.vec(2 * 6, 2.0);
+        let weight = rng.vec(3 * 2, 2.0);
 
-        let copied_rows: Vec<f32> = fused
-            .data()
-            .chunks(6)
-            .flat_map(|row| row[2..4].to_vec())
-            .collect();
-        let copied = Tensor::new(Shape::new(2, 2), copied_rows);
-        let expected = &copied * &weight;
+        let copied: Vec<f32> = fused.chunks(6).flat_map(|row| row[2..4].to_vec()).collect();
+        let expected = matmul_vec(&copied, &weight, 2, 2, 3);
 
-        let block = &fused.data()[2..10];
-        let a = TensorView::strided(block, Shape::new(2, 2), 6);
-        let mut out = Tensor::zeros(Shape::new(2, 3));
-        matmul(a, weight.as_view(), out.as_view_mut());
+        let a = TensorView::strided(&fused[2..10], Shape::new(2, 2), 6);
+        let mut out = vec![0.0f32; 2 * 3];
+        matmul(
+            a,
+            TensorView::contiguous(&weight, Shape::new(3, 2)),
+            TensorViewMut::contiguous(&mut out, Shape::new(2, 3)),
+        );
         assert_close(&out, &expected, 1e-6);
     }
 
     #[test]
     fn matmul_nn_hand_computed() {
         // A [2, 2] @ B [2, 3], textbook layout
-        let a = Tensor::new(Shape::new(2, 2), vec![1.0, 2.0, 3.0, 4.0]);
-        let b = Tensor::new(Shape::new(2, 3), vec![1.0, 0.0, 2.0, 0.0, 1.0, 3.0]);
-        let mut out = Tensor::zeros(Shape::new(2, 3));
-        matmul_nn(a.as_view(), b.as_view(), out.as_view_mut());
-        assert_eq!(out.data(), &[1.0, 2.0, 8.0, 3.0, 4.0, 18.0]);
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [1.0, 0.0, 2.0, 0.0, 1.0, 3.0];
+        let mut out = vec![0.0f32; 2 * 3];
+        matmul_nn(
+            TensorView::contiguous(&a, Shape::new(2, 2)),
+            TensorView::contiguous(&b, Shape::new(2, 3)),
+            TensorViewMut::contiguous(&mut out, Shape::new(2, 3)),
+        );
+        assert_eq!(out, &[1.0, 2.0, 8.0, 3.0, 4.0, 18.0]);
     }
 
     #[test]
     fn matmul_nn_agrees_with_the_transpose_trick() {
         // out = probs @ v equals the `a @ b^T` convention applied to v^T
+        let (m, k, n) = (3, 4, 2);
         let mut rng = Rng::new(0xD07);
-        let probs = rng.tensor(3, 4, 1.0);
-        let v = rng.tensor(4, 2, 2.0);
+        let probs = rng.vec(m * k, 1.0);
+        let v = rng.vec(k * n, 2.0);
 
-        let mut v_t = Tensor::zeros(Shape::new(2, 4));
-        for r in 0..4 {
-            for c in 0..2 {
-                v_t.row_mut(c)[r] = v.row(r)[c];
+        let mut v_t = vec![0.0f32; n * k];
+        for r in 0..k {
+            for c in 0..n {
+                v_t[c * k + r] = v[r * n + c];
             }
         }
-        let expected = &probs * &v_t;
+        let expected = matmul_vec(&probs, &v_t, m, k, n);
 
-        let mut out = Tensor::zeros(Shape::new(3, 2));
-        matmul_nn(probs.as_view(), v.as_view(), out.as_view_mut());
+        let mut out = vec![0.0f32; m * n];
+        matmul_nn(
+            TensorView::contiguous(&probs, Shape::new(m, k)),
+            TensorView::contiguous(&v, Shape::new(k, n)),
+            TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
+        );
         assert_close(&out, &expected, 1e-5);
     }
 
@@ -248,80 +197,50 @@ mod tests {
     fn causal_bound_never_reads_past_the_prefix() {
         // row i may only touch a[i, ..n_past + i + 1]; columns beyond hold
         // NaN, so any out-of-bound read would poison the output
-        let n_past = 0;
-        let a = Tensor::new(
-            Shape::new(3, 3),
-            vec![2.0, f32::NAN, f32::NAN, 1.0, 3.0, f32::NAN, 0.5, -1.0, 2.0],
+        let nan = f32::NAN;
+        let a = [2.0, nan, nan, 1.0, 3.0, nan, 0.5, -1.0, 2.0];
+        let b = [1.0, 2.0, 10.0, 20.0, 100.0, 200.0];
+        let mut out = vec![0.0f32; 3 * 2];
+        matmul_nn_causal(
+            TensorView::contiguous(&a, Shape::new(3, 3)),
+            TensorView::contiguous(&b, Shape::new(3, 2)),
+            TensorViewMut::contiguous(&mut out, Shape::new(3, 2)),
+            0,
         );
-        let b = Tensor::new(Shape::new(3, 2), vec![1.0, 2.0, 10.0, 20.0, 100.0, 200.0]);
-        let mut out = Tensor::zeros(Shape::new(3, 2));
-        matmul_nn_causal(a.as_view(), b.as_view(), out.as_view_mut(), n_past);
         let expected = [
             2.0, 4.0, // 2 * b0
             31.0, 62.0, // 1 * b0 + 3 * b1
             190.5, 381.0, // 0.5 * b0 - 1 * b1 + 2 * b2
         ];
-        assert_eq!(out.data(), &expected);
+        assert_eq!(out, &expected);
     }
 
     #[test]
     fn causal_bound_overwrites_stale_output() {
         // the driver's contract: out is fully overwritten, never accumulated
         // into across calls
-        let a = Tensor::new(Shape::new(1, 1), vec![3.0]);
-        let b = Tensor::new(Shape::new(1, 2), vec![1.0, 2.0]);
-        let mut out = Tensor::new(Shape::new(1, 2), vec![f32::NAN, 7.0]);
-        matmul_nn_causal(a.as_view(), b.as_view(), out.as_view_mut(), 0);
-        assert_eq!(out.data(), &[3.0, 6.0]);
-    }
-
-    #[test]
-    fn mul_assign_hand_computed() {
-        let mut input = Tensor::new(Shape::new(2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let weight = Tensor::new(Shape::new(2, 3), vec![1.0, 0.0, -1.0, 1.0, 1.0, 1.0]);
-        input *= &weight;
-        assert_eq!(input.shape(), Shape::new(2, 2));
-        assert_eq!(input.data(), &[-2.0, 6.0, -2.0, 15.0]);
-    }
-
-    #[test]
-    fn mul_assign_matches_borrowed_mul_for_shrink_same_and_grow() {
-        // n < k (shrink, reuses buffer), n == k, and n > k (grow)
-        let mut rng = Rng::new(0xBEEF);
-        for &(m, k, n) in &[
-            (3, 6, 2),
-            (3, 4, 4),
-            (3, 2, 8),
-            (1, 5, 1),
-            (5, 1, 5),
-            (4, 4, 4),
-        ] {
-            let a = rng.tensor(m, k, 2.0);
-            let b = rng.tensor(n, k, 2.0);
-            let expected = &a * &b;
-            let mut got = a.clone();
-            got *= &b;
-            assert_eq!(got.shape(), expected.shape(), "shape for ({m},{k},{n})");
-            assert_close(&got, &expected, 1e-5);
-        }
-    }
-
-    #[test]
-    fn mul_assign_shrink_keeps_the_original_capacity() {
-        // n <= k: the product fits, so the backing allocation is not grown
-        let mut t = Tensor::new(Shape::new(4, 4), vec![1.0; 16]);
-        let cap_before = t.data().len();
-        let w = Tensor::new(Shape::new(2, 4), vec![1.0; 8]);
-        t *= &w;
-        assert_eq!(t.shape(), Shape::new(4, 2));
-        assert!(t.data().len() <= cap_before);
+        let a = [3.0];
+        let b = [1.0, 2.0];
+        let mut out = vec![f32::NAN, 7.0];
+        matmul_nn_causal(
+            TensorView::contiguous(&a, Shape::new(1, 1)),
+            TensorView::contiguous(&b, Shape::new(1, 2)),
+            TensorViewMut::contiguous(&mut out, Shape::new(1, 2)),
+            0,
+        );
+        assert_eq!(out, &[3.0, 6.0]);
     }
 
     #[test]
     #[should_panic(expected = "contracted dim mismatch")]
     fn mismatched_inner_dim_panics() {
-        let input = Tensor::new(Shape::new(1, 3), vec![1.0, 2.0, 3.0]);
-        let weight = Tensor::new(Shape::new(1, 2), vec![1.0, 2.0]);
-        let _ = &input * &weight;
+        let input = [1.0, 2.0, 3.0];
+        let weight = [1.0, 2.0];
+        let mut out = vec![0.0f32; 1];
+        matmul(
+            TensorView::contiguous(&input, Shape::new(1, 3)),
+            TensorView::contiguous(&weight, Shape::new(1, 2)),
+            TensorViewMut::contiguous(&mut out, Shape::new(1, 1)),
+        );
     }
 }

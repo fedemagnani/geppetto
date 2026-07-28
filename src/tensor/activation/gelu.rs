@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::tensor::Tensor;
 use crate::tensor::TensorViewMut;
 
 /// sqrt(2/pi), matching ggml's constant to f32 precision.
@@ -23,20 +21,9 @@ pub fn gelu(mut x: TensorViewMut) {
 }
 
 #[cfg(test)]
-impl Tensor {
-    /// Elementwise GELU into a fresh tensor, delegating to the in-place
-    /// [`gelu`] over a view.
-    pub fn gelu(&self) -> Tensor {
-        let mut out = self.clone();
-        gelu(out.as_view_mut());
-        out
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::gelu_scalar;
-    use crate::tensor::{Shape, Tensor};
+    use super::{gelu, gelu_scalar};
+    use crate::tensor::{Shape, TensorViewMut};
 
     #[test]
     fn hand_computed_reference_points() {
@@ -77,11 +64,11 @@ mod tests {
 
     #[test]
     fn maps_every_element() {
-        let t = Tensor::new(Shape::new(2, 2), vec![0.0, 1.0, -1.0, 2.0]);
-        let out = t.gelu();
-        assert_eq!(out.shape(), t.shape());
-        for (o, i) in out.data().iter().zip(t.data()) {
-            assert_eq!(*o, gelu_scalar(*i));
+        let input = [0.0, 1.0, -1.0, 2.0];
+        let mut out = input.to_vec();
+        gelu(TensorViewMut::contiguous(&mut out, Shape::new(2, 2)));
+        for (o, i) in out.iter().zip(input) {
+            assert_eq!(*o, gelu_scalar(i));
         }
     }
 }

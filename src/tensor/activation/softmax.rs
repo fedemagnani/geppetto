@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::tensor::Tensor;
 use crate::tensor::TensorViewMut;
 
 /// Per-row softmax over the full row width, in place. Numerically stabilized
@@ -39,99 +37,62 @@ pub fn softmax_causal(mut x: TensorViewMut, n_past: usize) {
 }
 
 #[cfg(test)]
-impl Tensor {
-    /// Per-row softmax into a fresh tensor. When `mask` is given (same shape
-    /// as `self`) it is added first -- the additive attention mask, whose
-    /// `-inf` entries zero out disallowed positions. The maskless case
-    /// delegates to the in-place [`softmax`] over a view.
-    pub fn softmax(&self, mask: Option<&Tensor>) -> Tensor {
-        let mut out = self.clone();
-        let Some(mask) = mask else {
-            softmax(out.as_view_mut());
-            return out;
-        };
+mod tests {
+    use crate::tensor::{Shape, TensorViewMut, softmax, softmax_causal};
 
-        assert_eq!(mask.shape(), self.shape(), "softmax: mask shape must match");
-        for (r, row) in out.rows_mut().enumerate() {
-            for (slot, &m) in row.iter_mut().zip(mask.row(r)) {
-                *slot += m;
-            }
-        }
-        softmax(out.as_view_mut());
+    /// Full-width softmax of one row, through the driver.
+    fn softmax_row(row: &[f32]) -> Vec<f32> {
+        let mut out = row.to_vec();
+        let shape = Shape::new(1, row.len());
+        softmax(TensorViewMut::contiguous(&mut out, shape));
         out
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::tensor::{Shape, Tensor, softmax_causal};
 
     #[test]
     fn hand_computed_distribution() {
-        let x = Tensor::new(Shape::new(1, 3), vec![1.0, 2.0, 3.0]);
-        let out = x.softmax(None);
+        let out = softmax_row(&[1.0, 2.0, 3.0]);
         let expected = [0.090_030_57, 0.244_728_47, 0.665_240_96];
-        for (o, e) in out.data().iter().zip(expected) {
+        for (o, e) in out.iter().zip(expected) {
             assert!((o - e).abs() < 1e-6, "{o} vs {e}");
         }
     }
 
     #[test]
     fn each_row_sums_to_one() {
-        let x = Tensor::new(
-            Shape::new(2, 4),
-            vec![0.1, 0.2, 0.3, 0.4, -5.0, 5.0, 0.0, 2.0],
-        );
-        for row in x.softmax(None).data().chunks(4) {
+        let mut x = vec![0.1, 0.2, 0.3, 0.4, -5.0, 5.0, 0.0, 2.0];
+        softmax(TensorViewMut::contiguous(&mut x, Shape::new(2, 4)));
+        for row in x.chunks(4) {
             assert!((row.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         }
     }
 
     #[test]
     fn is_shift_invariant() {
-        let x = Tensor::new(Shape::new(1, 3), vec![1.0, 2.0, 3.0]);
-        let shifted = Tensor::new(Shape::new(1, 3), vec![101.0, 102.0, 103.0]);
-        for (a, b) in x
-            .softmax(None)
-            .data()
-            .iter()
-            .zip(shifted.softmax(None).data())
-        {
-            assert!((a - b).abs() < 1e-6);
+        let a = softmax_row(&[1.0, 2.0, 3.0]);
+        let b = softmax_row(&[101.0, 102.0, 103.0]);
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).abs() < 1e-6);
         }
     }
 
     #[test]
-    fn additive_mask_removes_positions() {
-        let x = Tensor::new(Shape::new(1, 3), vec![1.0, 2.0, 3.0]);
-        let mask = Tensor::new(Shape::new(1, 3), vec![0.0, 0.0, f32::NEG_INFINITY]);
-        let out = x.softmax(Some(&mask));
-        assert_eq!(out.data()[2], 0.0);
-        assert!((out.data().iter().sum::<f32>() - 1.0).abs() < 1e-6);
-        // remaining two follow softmax([1, 2])
-        assert!((out.data()[0] - 0.268_941_42).abs() < 1e-6);
-    }
-
-    #[test]
-    fn causal_bound_matches_the_additive_mask_on_the_prefix() {
-        // scores [n_q=2, n_kv=3] with n_past=1: row i attends to 0..=n_past+i
+    fn causal_bound_matches_full_softmax_on_the_prefix() {
+        // scores [n_q=2, n_kv=3] with n_past=1: row i attends to 0..=n_past+i,
+        // and within that prefix must equal a plain softmax over it
         let n_past = 1;
-        let scores = vec![0.3, -1.2, 9.9, 0.7, 0.1, -0.4];
-        let x = Tensor::new(Shape::new(2, 3), scores.clone());
+        let scores = [0.3, -1.2, 9.9, 0.7, 0.1, -0.4];
 
-        let mask = Tensor::new(
-            Shape::new(2, 3),
-            vec![0.0, 0.0, f32::NEG_INFINITY, 0.0, 0.0, 0.0],
+        let mut got = scores.to_vec();
+        softmax_causal(
+            TensorViewMut::contiguous(&mut got, Shape::new(2, 3)),
+            n_past,
         );
-        let expected = x.softmax(Some(&mask));
 
-        let mut got = Tensor::new(Shape::new(2, 3), scores);
-        softmax_causal(got.as_view_mut(), n_past);
         for i in 0..2 {
             let bound = n_past + i + 1;
-            for j in 0..bound {
-                let e = expected.row(i)[j];
-                let g = got.row(i)[j];
+            let expected = softmax_row(&scores[i * 3..i * 3 + bound]);
+            for (j, e) in expected.iter().enumerate() {
+                let g = got[i * 3 + j];
                 assert!((e - g).abs() < 1e-6, "[{i}, {j}]: {e} vs {g}");
             }
         }
@@ -140,16 +101,13 @@ mod tests {
     #[test]
     fn causal_bound_leaves_the_tail_untouched() {
         let sentinel = 123.0;
-        let mut x = Tensor::new(
-            Shape::new(2, 3),
-            vec![1.0, sentinel, sentinel, 1.0, 1.0, sentinel],
-        );
-        softmax_causal(x.as_view_mut(), 0);
-        assert_eq!(x.row(0)[1], sentinel);
-        assert_eq!(x.row(0)[2], sentinel);
-        assert_eq!(x.row(1)[2], sentinel);
+        let mut x = vec![1.0, sentinel, sentinel, 1.0, 1.0, sentinel];
+        softmax_causal(TensorViewMut::contiguous(&mut x, Shape::new(2, 3)), 0);
+        assert_eq!(x[1], sentinel);
+        assert_eq!(x[2], sentinel);
+        assert_eq!(x[5], sentinel);
         // and the prefixes are normalized
-        assert_eq!(x.row(0)[0], 1.0);
-        assert!((x.row(1)[0] - 0.5).abs() < 1e-6);
+        assert_eq!(x[0], 1.0);
+        assert!((x[3] - 0.5).abs() < 1e-6);
     }
 }

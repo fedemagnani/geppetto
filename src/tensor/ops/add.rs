@@ -1,8 +1,3 @@
-#[cfg(test)]
-use std::ops::{Add, AddAssign};
-
-#[cfg(test)]
-use crate::tensor::Tensor;
 use crate::tensor::{TensorView, TensorViewMut};
 
 /// `out += rhs`, elementwise and in place. `rhs` is either the same shape as
@@ -34,81 +29,59 @@ pub fn add(mut out: TensorViewMut, rhs: TensorView) {
     }
 }
 
-/// `self += rhs`, delegating to [`add`]; `self`'s shape is unchanged.
-#[cfg(test)]
-impl AddAssign<&Tensor> for Tensor {
-    fn add_assign(&mut self, rhs: &Tensor) {
-        add(self.as_view_mut(), rhs.as_view());
-    }
-}
-
-/// `self + rhs`, delegating to [`AddAssign`]. The owned `self` variant reuses
-/// its buffer; the `&Tensor` variant clones it first.
-#[cfg(test)]
-impl Add<&Tensor> for Tensor {
-    type Output = Tensor;
-
-    fn add(mut self, rhs: &Tensor) -> Tensor {
-        self += rhs;
-        self
-    }
-}
-
-#[cfg(test)]
-impl Add<&Tensor> for &Tensor {
-    type Output = Tensor;
-
-    fn add(self, rhs: &Tensor) -> Tensor {
-        self.clone() + rhs
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::tensor::{Shape, Tensor};
+    use crate::tensor::{Shape, TensorView, TensorViewMut, add};
+
+    /// `a += b` over fresh views, returning the mutated buffer.
+    fn add_vec(a: &[f32], a_shape: Shape, b: &[f32], b_shape: Shape) -> Vec<f32> {
+        let mut out = a.to_vec();
+        add(
+            TensorViewMut::contiguous(&mut out, a_shape),
+            TensorView::contiguous(b, b_shape),
+        );
+        out
+    }
 
     #[test]
     fn elementwise_same_shape() {
-        let a = Tensor::new(Shape::new(2, 2), vec![1.0, 2.0, 3.0, 4.0]);
-        let b = Tensor::new(Shape::new(2, 2), vec![10.0, 20.0, 30.0, 40.0]);
-        assert_eq!((&a + &b).data(), &[11.0, 22.0, 33.0, 44.0]);
+        let shape = Shape::new(2, 2);
+        let out = add_vec(
+            &[1.0, 2.0, 3.0, 4.0],
+            shape,
+            &[10.0, 20.0, 30.0, 40.0],
+            shape,
+        );
+        assert_eq!(out, &[11.0, 22.0, 33.0, 44.0]);
     }
 
     #[test]
     fn broadcasts_a_single_row_bias() {
-        let a = Tensor::new(Shape::new(3, 2), vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
-        let bias = Tensor::new(Shape::new(1, 2), vec![0.5, -0.5]);
-        assert_eq!((&a + &bias).data(), &[1.5, 0.5, 2.5, 1.5, 3.5, 2.5]);
-    }
-
-    #[test]
-    fn owned_lhs_reuses_its_buffer() {
-        let a = Tensor::new(Shape::new(1, 3), vec![1.0, -2.0, 3.0]);
-        let b = Tensor::new(Shape::new(1, 3), vec![4.0, 5.0, -6.0]);
-        assert_eq!((a + &b).data(), &[5.0, 3.0, -3.0]);
-    }
-
-    #[test]
-    fn add_assign_mutates_in_place() {
-        let mut a = Tensor::new(Shape::new(2, 2), vec![1.0, 2.0, 3.0, 4.0]);
-        let bias = Tensor::new(Shape::new(1, 2), vec![10.0, 20.0]);
-        a += &bias;
-        assert_eq!(a.data(), &[11.0, 22.0, 13.0, 24.0]);
-        assert_eq!(a.shape(), Shape::new(2, 2));
+        let out = add_vec(
+            &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+            Shape::new(3, 2),
+            &[0.5, -0.5],
+            Shape::new(1, 2),
+        );
+        assert_eq!(out, &[1.5, 0.5, 2.5, 1.5, 3.5, 2.5]);
     }
 
     #[test]
     fn is_commutative_for_matching_shapes() {
-        let a = Tensor::new(Shape::new(1, 3), vec![1.0, -2.0, 3.0]);
-        let b = Tensor::new(Shape::new(1, 3), vec![4.0, 5.0, -6.0]);
-        assert_eq!((&a + &b).data(), (&b + &a).data());
+        let shape = Shape::new(1, 3);
+        let a = [1.0, -2.0, 3.0];
+        let b = [4.0, 5.0, -6.0];
+        assert_eq!(add_vec(&a, shape, &b, shape), add_vec(&b, shape, &a, shape));
     }
 
     #[test]
     #[should_panic(expected = "column mismatch")]
     fn column_mismatch_panics() {
-        let a = Tensor::new(Shape::new(1, 3), vec![1.0, 2.0, 3.0]);
-        let b = Tensor::new(Shape::new(1, 2), vec![1.0, 2.0]);
-        let _ = &a + &b;
+        let _ = add_vec(
+            &[1.0, 2.0, 3.0],
+            Shape::new(1, 3),
+            &[1.0, 2.0],
+            Shape::new(1, 2),
+        );
     }
 }
