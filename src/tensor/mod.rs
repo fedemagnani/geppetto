@@ -12,13 +12,17 @@ mod error;
 pub mod layer;
 mod ops;
 mod shape;
+mod view;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use activation::{gelu, softmax, softmax_causal};
 pub use dtype::DType;
 pub use error::TensorError;
+pub use ops::{add, matmul, matmul_nn, matmul_nn_causal};
 pub use shape::Shape;
+pub use view::{TensorView, TensorViewMut};
 
 /// Size in bytes of a contiguous row of `n_elements` stored as `dtype`.
 ///
@@ -114,6 +118,15 @@ impl Tensor {
     pub fn rows_mut(&mut self) -> impl Iterator<Item = &mut [f32]> {
         let cols = self.cols().max(1);
         self.data.chunks_mut(cols)
+    }
+
+    /// Borrows the whole tensor as a contiguous view.
+    pub fn as_view(&self) -> TensorView<'_> {
+        TensorView::new(&self.data, self.shape)
+    }
+
+    pub fn as_view_mut(&mut self) -> TensorViewMut<'_> {
+        TensorViewMut::new(&mut self.data, self.shape)
     }
 }
 

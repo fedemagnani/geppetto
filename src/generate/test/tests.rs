@@ -75,9 +75,8 @@ fn the_first_greedy_token_is_the_argmax_of_the_prompt_logits() {
     let first = greedy_run(&model, &prompt, 1)[0];
 
     // ...against a plain forward pass of the same prompt
-    let mut cache = model.new_kv_cache();
-    let logits = model.forward(&mut cache, &prompt).unwrap();
-    let last = logits.row(logits.rows() - 1);
+    let mut state = model.new_state();
+    let last = model.forward(&mut state, &prompt).unwrap();
     let mut expected = 0;
     for (i, &logit) in last.iter().enumerate() {
         if logit > last[expected] {
@@ -96,12 +95,12 @@ fn decoding_is_incremental_over_the_cache() {
 
     generator.next_token().unwrap();
     // the prefill put the whole prompt in the cache
-    assert_eq!(generator.cache().len(), prompt.len());
+    assert_eq!(generator.state().n_past(), prompt.len());
 
     for expected in 1..=3 {
         generator.next_token().unwrap();
         // each later step adds exactly one position
-        assert_eq!(generator.cache().len(), prompt.len() + expected);
+        assert_eq!(generator.state().n_past(), prompt.len() + expected);
     }
 }
 
@@ -135,7 +134,7 @@ fn generation_stops_when_the_context_fills_up() {
     // free slot; only the token after that has nowhere to go
     assert_eq!(tokens.len(), n_ctx - prompt.len() + 1);
     assert_eq!(generator.stop_reason(), Some(StopReason::ContextFull));
-    assert_eq!(generator.cache().len(), n_ctx, "the window is full");
+    assert_eq!(generator.state().n_past(), n_ctx, "the window is full");
 }
 
 #[test]

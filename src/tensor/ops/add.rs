@@ -1,35 +1,40 @@
 use std::ops::{Add, AddAssign};
 
-use crate::tensor::Tensor;
+use crate::tensor::{Tensor, TensorView, TensorViewMut};
 
-/// `self += rhs`, elementwise. `rhs` is either the same shape as `self` or a
-/// single row (`[1, self.cols()]`) broadcast across every row -- the bias-add
-/// the FFN and attention projections need. In place: `self`'s buffer is
-/// mutated, its shape unchanged.
-impl AddAssign<&Tensor> for Tensor {
-    #[hotpath::measure]
-    fn add_assign(&mut self, rhs: &Tensor) {
-        let broadcast = rhs.rows() == 1 && self.rows() != 1;
-        assert_eq!(
-            self.cols(),
-            rhs.cols(),
-            "add: column mismatch, {} vs {}",
-            self.shape(),
-            rhs.shape(),
-        );
-        assert!(
-            broadcast || self.rows() == rhs.rows(),
-            "add: row mismatch, {} vs {}",
-            self.shape(),
-            rhs.shape(),
-        );
+/// `out += rhs`, elementwise and in place. `rhs` is either the same shape as
+/// `out` or a single row (`[1, out.cols()]`) broadcast across every row --
+/// the bias-add the FFN and attention projections need.
+#[hotpath::measure]
+pub fn add(mut out: TensorViewMut, rhs: TensorView) {
+    let broadcast = rhs.rows() == 1 && out.rows() != 1;
+    assert_eq!(
+        out.cols(),
+        rhs.cols(),
+        "add: column mismatch, {} vs {}",
+        out.shape(),
+        rhs.shape(),
+    );
+    assert!(
+        broadcast || out.rows() == rhs.rows(),
+        "add: row mismatch, {} vs {}",
+        out.shape(),
+        rhs.shape(),
+    );
 
-        for (r, row) in self.rows_mut().enumerate() {
-            let rhs_row = if broadcast { rhs.row(0) } else { rhs.row(r) };
-            for (slot, &bias) in row.iter_mut().zip(rhs_row) {
-                *slot += bias;
-            }
+    for r in 0..out.rows() {
+        let rhs_row = if broadcast { rhs.row(0) } else { rhs.row(r) };
+        let row = out.row_mut(r);
+        for (slot, &bias) in row.iter_mut().zip(rhs_row) {
+            *slot += bias;
         }
+    }
+}
+
+/// `self += rhs`, delegating to [`add`]; `self`'s shape is unchanged.
+impl AddAssign<&Tensor> for Tensor {
+    fn add_assign(&mut self, rhs: &Tensor) {
+        add(self.as_view_mut(), rhs.as_view());
     }
 }
 

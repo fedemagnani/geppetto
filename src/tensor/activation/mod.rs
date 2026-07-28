@@ -1,7 +1,10 @@
-//! Activation functions on [`crate::tensor::Tensor`], one per file: `gelu`
-//! (the tanh approximation ggml uses for GPT-2's FFN) and `softmax` (the
-//! attention distribution). Both are inherent methods; the modules hold only
-//! `impl Tensor` blocks, so there is nothing to re-export.
+//! Activation functions, one per file: `gelu` (the tanh approximation ggml
+//! uses for GPT-2's FFN) and `softmax` (the attention distribution), each an
+//! in-place free function over a view plus a thin allocating method on
+//! [`crate::tensor::Tensor`].
 
 mod gelu;
 mod softmax;
+
+pub use gelu::gelu;
+pub use softmax::{softmax, softmax_causal};

@@ -1,19 +1,37 @@
+use crate::arena::poison;
 use crate::gpt2::attention::multi_head_attention;
-use crate::gpt2::{Gpt2Model, ModelError};
-use crate::kv_cache::KvCache;
-use crate::tensor::layer::{NormLayer, SimpleLayer};
-use crate::tensor::{Shape, Tensor};
+use crate::gpt2::{Gpt2Model, Gpt2State, ModelError};
+use crate::tensor::layer::{get_rows, norm};
+use crate::tensor::{Shape, TensorView, TensorViewMut, add, gelu, matmul};
+
+/// Mounts the `[rows, cols]` active prefix of a scratch region; never the
+/// whole worst-case carve.
+fn prefix(region: &[f32], rows: usize, cols: usize) -> TensorView<'_> {
+    TensorView::new(&region[..rows * cols], Shape::new(rows, cols))
+}
+
+fn prefix_mut(region: &mut [f32], rows: usize, cols: usize) -> TensorViewMut<'_> {
+    TensorViewMut::new(&mut region[..rows * cols], Shape::new(rows, cols))
+}
 
 impl Gpt2Model {
-    /// Runs `tokens` through the network on top of the cache's `n_past`
-    /// positions, appending their keys and values, and returns the logits
-    /// `[tokens.len(), n_vocab]` (one row per new position). Mirrors the graph
-    /// in `src/models/gpt2.cpp`.
+    /// Runs `tokens` through the network on top of the state's `n_past`
+    /// positions, appending their keys and values, and returns the last
+    /// position's logits (`n_vocab` floats) -- earlier positions predict
+    /// nothing a caller can use. Mirrors the graph in `src/models/gpt2.cpp`.
+    ///
+    /// The logits live in the state's arena: they stay valid until the next
+    /// forward call overwrites them, which the borrow checker enforces.
     #[hotpath::measure]
-    pub fn forward(&self, cache: &mut KvCache, tokens: &[u32]) -> Result<Tensor, ModelError> {
+    pub fn forward<'s>(
+        &self,
+        state: &'s mut Gpt2State,
+        tokens: &[u32],
+    ) -> Result<&'s [f32], ModelError> {
         let hp = self.hparams();
         let w = self.weights();
         let n_vocab = w.vocabulary_size();
+        let n_embd = hp.n_embd;
 
         // verifies that each token is included in the vocabulary size
         for &token in tokens {
@@ -24,7 +42,7 @@ impl Gpt2Model {
 
         // verifies that the overall processed tokens don't overshoot the context window.
         let n_new = tokens.len();
-        let n_past = cache.len();
+        let n_past = state.n_past();
         if n_past + n_new > hp.n_ctx {
             return Err(ModelError::ContextOverflow {
                 n_past,
@@ -34,126 +52,155 @@ impl Gpt2Model {
         }
 
         if n_new == 0 {
-            return Ok(Tensor::zeros(Shape::new(0, n_vocab)));
+            return Ok(&[]);
         }
 
-        let head_dim = hp.head_dim();
         let n_kv = n_past + n_new;
-        // define the position of the new tokens, just appended to the tail.
-        // this is needed to
-        let positions: Vec<u32> = (n_past..n_kv).map(|p| p as u32).collect();
+        let head_dim = hp.head_dim();
+        let qkv_width = 3 * n_embd;
+
+        // nothing can fail past this point, so the bookkeeping happens before
+        // the arena borrow starts
+        state.advance(n_new);
+        let (views, mut kv) = state.begin_pass();
 
         /////////////////////////////
-        // Compute embeddings
-        // returns the row of the embedding vector indexed by the token index
-        let mut inp = w.token_embd.get_rows(tokens);
-
-        /////////////////////////////
-        // Apply positional encodings
-        inp += &w.pos_embd.get_rows(&positions);
+        // Compute embeddings + positional encodings
+        get_rows(
+            w.token_embd.as_view(),
+            tokens,
+            prefix_mut(views.x, n_new, n_embd),
+        );
+        // consecutive positions are consecutive rows of pos_embd: the gather
+        // collapses to one contiguous block
+        let pos_block = &w.pos_embd.data()[n_past * n_embd..n_kv * n_embd];
+        let pos = TensorView::new(pos_block, Shape::new(n_new, n_embd));
+        add(prefix_mut(views.x, n_new, n_embd), pos);
 
         // evaluate each transformer block
         for (il, layer) in w.layers.iter().enumerate() {
             /////////////////////////////
             // Normalization layer
-            let layer_norm = NormLayer::new(&layer.attn_norm_w, &layer.attn_norm_b, hp.eps);
-            let normed = layer_norm.forward(&inp);
+            poison(views.norm_out);
+            norm(
+                prefix(views.x, n_new, n_embd),
+                layer.attn_norm_w.as_view(),
+                layer.attn_norm_b.as_view(),
+                hp.eps,
+                prefix_mut(views.norm_out, n_new, n_embd),
+            );
 
             /////////////////////////////
             // Q,K,V computation
-            let qkv = (&normed * &layer.attn_qkv_w) + &layer.attn_qkv_b; // [n_new, 3*n_embd]
-            let (q, k, v) = split_qkv(&qkv, hp.n_embd);
-            cache.append(il, &k, &v);
+            poison(views.qkv);
+            let mut qkv = prefix_mut(views.qkv, n_new, qkv_width);
+            matmul(
+                prefix(views.norm_out, n_new, n_embd),
+                layer.attn_qkv_w.as_view(),
+                qkv.reborrow(),
+            );
+            add(qkv, layer.attn_qkv_b.as_view());
+
+            for (i, row) in views.qkv.chunks_exact(qkv_width).take(n_new).enumerate() {
+                let k_row = &row[n_embd..2 * n_embd];
+                let v_row = &row[2 * n_embd..];
+                kv.append_row(il, n_past + i, k_row, v_row);
+            }
 
             /////////////////////////////
             // Multi-Head attention layer
-            let attn = multi_head_attention(
-                q.data(),
-                cache.keys(il),
-                cache.values(il),
+            multi_head_attention(
+                views.qkv,
+                kv.keys(il, n_kv),
+                kv.values(il, n_kv),
+                views.scores,
+                views.attn_out,
                 n_new,
                 n_kv,
                 hp.n_head,
                 head_dim,
             );
 
-            let attn_simple = SimpleLayer::new(&layer.attn_out_w, &layer.attn_out_b);
-            let attn = attn_simple.forward(&attn);
+            poison(views.proj_out);
+            let mut proj = prefix_mut(views.proj_out, n_new, n_embd);
+            matmul(
+                prefix(views.attn_out, n_new, n_embd),
+                layer.attn_out_w.as_view(),
+                proj.reborrow(),
+            );
+            add(proj, layer.attn_out_b.as_view());
 
             /////////////////////////////
             // Residual connections
-            let ffn_inp = attn + &inp;
+            add(
+                prefix_mut(views.x, n_new, n_embd),
+                prefix(views.proj_out, n_new, n_embd),
+            );
 
             /////////////////////////////
             // Feed-Forward layer
-            let ff_norm = NormLayer::new(&layer.ffn_norm_w, &layer.ffn_norm_b, hp.eps);
-            let ff_simple_up = SimpleLayer::new(&layer.ffn_up_w, &layer.ffn_up_b);
-            let ff_simple_down = SimpleLayer::new(&layer.ffn_down_w, &layer.ffn_down_b);
-            let ff_layer = FeedForwardLayer::new(ff_norm, ff_simple_up, ff_simple_down);
+            poison(views.norm_out);
+            norm(
+                prefix(views.x, n_new, n_embd),
+                layer.ffn_norm_w.as_view(),
+                layer.ffn_norm_b.as_view(),
+                hp.eps,
+                prefix_mut(views.norm_out, n_new, n_embd),
+            );
 
-            let ff = ff_layer.forward(&ffn_inp);
+            poison(views.ffn_up);
+            let mut up = prefix_mut(views.ffn_up, n_new, hp.n_ff);
+            matmul(
+                prefix(views.norm_out, n_new, n_embd),
+                layer.ffn_up_w.as_view(),
+                up.reborrow(),
+            );
+            add(up.reborrow(), layer.ffn_up_b.as_view());
+            gelu(up);
+
+            poison(views.proj_out);
+            let mut down = prefix_mut(views.proj_out, n_new, n_embd);
+            matmul(
+                prefix(views.ffn_up, n_new, hp.n_ff),
+                layer.ffn_down_w.as_view(),
+                down.reborrow(),
+            );
+            add(down, layer.ffn_down_b.as_view());
 
             /////////////////////////////
             // Residual connections
-            inp = ff + &ffn_inp;
+            add(
+                prefix_mut(views.x, n_new, n_embd),
+                prefix(views.proj_out, n_new, n_embd),
+            );
         }
 
         /////////////////////////////
-        // Normalization layer
-        let out_layer_norm = NormLayer::new(&w.output_norm_w, &w.output_norm_b, hp.eps);
-        let normed = out_layer_norm.forward(&inp);
+        // Normalization layer, on the last position only
+        poison(views.norm_out);
+        let last_row = &views.x[(n_new - 1) * n_embd..n_new * n_embd];
+        norm(
+            TensorView::new(last_row, Shape::new(1, n_embd)),
+            w.output_norm_w.as_view(),
+            w.output_norm_b.as_view(),
+            hp.eps,
+            prefix_mut(views.norm_out, 1, n_embd),
+        );
 
-        Ok(&normed * &w.output) // [n_new, n_vocab]
-    }
-}
+        /////////////////////////////
+        // Unembedding into the logits region
+        matmul(
+            prefix(views.norm_out, 1, n_embd),
+            w.output.as_view(),
+            prefix_mut(views.logits, 1, n_vocab),
+        );
 
-/// Splits a fused QKV activation `[n, 3*n_embd]` into Q, K, V, each
-/// `[n, n_embd]`, from the contiguous column blocks `[0, n_embd)`,
-/// `[n_embd, 2*n_embd)`, `[2*n_embd, 3*n_embd)`.
-#[hotpath::measure]
-fn split_qkv(qkv: &Tensor, n_embd: usize) -> (Tensor, Tensor, Tensor) {
-    let n = qkv.rows();
-    let mut q = vec![0.0f32; n * n_embd];
-    let mut k = vec![0.0f32; n * n_embd];
-    let mut v = vec![0.0f32; n * n_embd];
-    for i in 0..n {
-        let row = qkv.row(i);
-        let dst = i * n_embd..(i + 1) * n_embd;
-        q[dst.clone()].copy_from_slice(&row[0..n_embd]);
-        k[dst.clone()].copy_from_slice(&row[n_embd..2 * n_embd]);
-        v[dst].copy_from_slice(&row[2 * n_embd..3 * n_embd]);
-    }
-    let shape = Shape::new(n, n_embd);
-    (
-        Tensor::new(shape, q),
-        Tensor::new(shape, k),
-        Tensor::new(shape, v),
-    )
-}
-
-struct FeedForwardLayer<'a> {
-    norm: NormLayer<'a>,
-    simple_up: SimpleLayer<'a>,
-    simple_down: SimpleLayer<'a>,
-}
-
-impl<'a> FeedForwardLayer<'a> {
-    pub fn new(
-        norm: NormLayer<'a>,
-        simple_up: SimpleLayer<'a>,
-        simple_down: SimpleLayer<'a>,
-    ) -> Self {
-        Self {
-            norm,
-            simple_up,
-            simple_down,
-        }
-    }
-
-    pub fn forward(&self, input: &Tensor) -> Tensor {
-        let ff = self.norm.forward(input);
-        let ff = self.simple_up.forward(&ff);
-        let ff = ff.gelu();
-        self.simple_down.forward(&ff)
+        let logits: &'s [f32] = views.logits;
+        let logits = &logits[..n_vocab];
+        debug_assert!(
+            logits.iter().all(|v| v.is_finite()),
+            "non-finite logits: a scratch region was read before being written"
+        );
+        Ok(logits)
     }
 }

@@ -1,127 +1,147 @@
-use crate::tensor::{Shape, Tensor};
+use crate::arena::poison;
+use crate::tensor::{Shape, TensorView, TensorViewMut, matmul, matmul_nn_causal, softmax_causal};
 
-/// Multi-head causal self-attention for one layer.
+/// Multi-head causal self-attention for one layer, over arena regions --
+/// no allocation, no mask tensor, no per-head copies.
 ///
-/// `q` is this step's queries `[n_q, n_embd]`; `k` and `v` are the layer's full
-/// cache `[n_kv, n_embd]`, including the `n_q` positions just appended, all
-/// row-major slices. `n_past = n_kv - n_q` offsets the causal mask: query row
-/// `i` (absolute position `n_past + i`) may attend to key positions
-/// `0..=n_past + i`. Within a row the `n_head` heads occupy contiguous
-/// `head_dim` column blocks, matching the fused-QKV layout. Returns
-/// `[n_q, n_embd]`.
+/// `qkv` is the fused activation region, rows `q | k | v` of width
+/// `3 * n_embd`; only the Q columns are read here (K and V were already
+/// appended to the cache). `keys` and `values` are the layer's cache prefixes
+/// `[n_kv, n_embd]`, row-major. `scores` (`>= n_new * n_kv`) and `attn_out`
+/// (`>= n_new * n_embd`) are scratch regions this function fully owns for the
+/// call: `attn_out`'s active prefix is the output.
+///
+/// Heads run strictly sequentially: head `h` touches only its `head_dim`
+/// column block, but the *backing slices* of sibling blocks overlap (the
+/// stride gaps), so a strided view is mounted inside the loop and dropped
+/// before the next iteration -- never collected.
+///
+/// The causal structure is the per-row prefix bound `n_past + i + 1` shared
+/// by [`softmax_causal`] and [`matmul_nn_causal`]; columns beyond it are
+/// never read, so the score matmul's upper triangle is dead work only during
+/// prefill and no `-inf` mask ever exists.
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 pub fn multi_head_attention(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    n_q: usize,
+    qkv: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    scores: &mut [f32],
+    attn_out: &mut [f32],
+    n_new: usize,
     n_kv: usize,
     n_head: usize,
     head_dim: usize,
-) -> Tensor {
+) {
     let n_embd = n_head * head_dim;
-    let n_past = n_kv - n_q;
+    let qkv_width = 3 * n_embd;
+    let n_past = n_kv - n_new;
     let scale = 1.0 / (head_dim as f32).sqrt();
-    let mask = causal_mask(n_q, n_kv, n_past);
 
-    let mut out = vec![0.0f32; n_q * n_embd];
+    // one poison for the whole loop: heads write disjoint column blocks, and
+    // a per-head poison would wipe the previous heads' output
+    poison(attn_out);
+
     for h in 0..n_head {
         let off = h * head_dim;
-        let qh = gather_head(q, n_q, n_embd, off, head_dim); // [n_q, head_dim]
-        let kh = gather_head(k, n_kv, n_embd, off, head_dim); // [n_kv, head_dim]
+        let head_shape = |rows: usize| Shape::new(rows, head_dim);
 
-        let mut scores = &qh * &kh; // [n_q, n_kv], scores[i, j] = qh_i . kh_j
-        for s in scores.data_mut() {
-            *s *= scale;
+        let q_block = &qkv[off..(n_new - 1) * qkv_width + off + head_dim];
+        let q_h = TensorView::strided(q_block, head_shape(n_new), qkv_width);
+        let k_block = &keys[off..(n_kv - 1) * n_embd + off + head_dim];
+        let k_h = TensorView::strided(k_block, head_shape(n_kv), n_embd);
+
+        poison(scores);
+        let scores_prefix = &mut scores[..n_new * n_kv];
+        let scores_shape = Shape::new(n_new, n_kv);
+        matmul(q_h, k_h, TensorViewMut::new(scores_prefix, scores_shape));
+        for (i, row) in scores_prefix.chunks_exact_mut(n_kv).enumerate() {
+            let bound = (n_past + i + 1).min(n_kv);
+            for s in &mut row[..bound] {
+                *s *= scale;
+            }
         }
-        let probs = scores.softmax(Some(&mask));
+        softmax_causal(TensorViewMut::new(scores_prefix, scores_shape), n_past);
 
-        // out_h = probs @ v_h; `*` gives probs @ rhs^T, so transpose v_h first
-        let vh_t = gather_head_transposed(v, n_kv, n_embd, off, head_dim); // [head_dim, n_kv]
-        let out_h = &probs * &vh_t; // [n_q, head_dim]
-
-        for i in 0..n_q {
-            out[i * n_embd + off..i * n_embd + off + head_dim].copy_from_slice(out_h.row(i));
-        }
+        let v_block = &values[off..(n_kv - 1) * n_embd + off + head_dim];
+        let v_h = TensorView::strided(v_block, head_shape(n_kv), n_embd);
+        let out_block = &mut attn_out[off..(n_new - 1) * n_embd + off + head_dim];
+        let out_h = TensorViewMut::strided(out_block, head_shape(n_new), n_embd);
+        let probs = TensorView::new(&scores[..n_new * n_kv], scores_shape);
+        matmul_nn_causal(probs, v_h, out_h, n_past);
     }
-    Tensor::new(Shape::new(n_q, n_embd), out)
-}
-
-/// `[n_q, n_kv]` additive mask: `0` where a query may attend, `-inf` otherwise.
-#[hotpath::measure]
-fn causal_mask(n_q: usize, n_kv: usize, n_past: usize) -> Tensor {
-    let mut mask = vec![0.0f32; n_q * n_kv];
-    for i in 0..n_q {
-        for j in (n_past + i + 1)..n_kv {
-            mask[i * n_kv + j] = f32::NEG_INFINITY;
-        }
-    }
-    Tensor::new(Shape::new(n_q, n_kv), mask)
-}
-
-/// Head `[off, off + head_dim)` of every row: `[rows, head_dim]`.
-#[hotpath::measure]
-fn gather_head(src: &[f32], rows: usize, n_embd: usize, off: usize, head_dim: usize) -> Tensor {
-    let mut out = vec![0.0f32; rows * head_dim];
-    for r in 0..rows {
-        let from = r * n_embd + off;
-        out[r * head_dim..(r + 1) * head_dim].copy_from_slice(&src[from..from + head_dim]);
-    }
-    Tensor::new(Shape::new(rows, head_dim), out)
-}
-
-/// Head `[off, off + head_dim)` transposed to `[head_dim, rows]`, so the V
-/// multiply can use the `self @ rhs^T` operator.
-#[hotpath::measure]
-fn gather_head_transposed(
-    src: &[f32],
-    rows: usize,
-    n_embd: usize,
-    off: usize,
-    head_dim: usize,
-) -> Tensor {
-    let mut out = vec![0.0f32; head_dim * rows];
-    for r in 0..rows {
-        for d in 0..head_dim {
-            out[d * rows + r] = src[r * n_embd + off + d];
-        }
-    }
-    Tensor::new(Shape::new(head_dim, rows), out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Runs attention with q rows padded into a fused `q | k | v` layout (the
+    /// K/V columns hold junk: attention must only read Q) and fresh scratch.
+    fn attend(
+        q: &[f32],
+        keys: &[f32],
+        values: &[f32],
+        n_new: usize,
+        n_kv: usize,
+        n_head: usize,
+        head_dim: usize,
+    ) -> Vec<f32> {
+        let n_embd = n_head * head_dim;
+        let mut qkv = vec![777.0; n_new * 3 * n_embd];
+        for (row, q_row) in qkv.chunks_exact_mut(3 * n_embd).zip(q.chunks_exact(n_embd)) {
+            row[..n_embd].copy_from_slice(q_row);
+        }
+        let mut scores = vec![0.0; n_new * n_kv];
+        let mut attn_out = vec![0.0; n_new * n_embd];
+        multi_head_attention(
+            &qkv,
+            keys,
+            values,
+            &mut scores,
+            &mut attn_out,
+            n_new,
+            n_kv,
+            n_head,
+            head_dim,
+        );
+        attn_out
+    }
+
     #[test]
     fn single_head_single_token_is_the_value() {
         // one query, one key/value position: softmax over a single score is 1,
         // so the output is exactly the value vector.
-        let q = vec![1.0, 2.0];
-        let k = vec![3.0, 4.0];
-        let v = vec![5.0, 6.0];
-        let out = multi_head_attention(&q, &k, &v, 1, 1, 1, 2);
-        assert_eq!(out.data(), &[5.0, 6.0]);
+        let out = attend(&[1.0, 2.0], &[3.0, 4.0], &[5.0, 6.0], 1, 1, 1, 2);
+        assert_eq!(out, &[5.0, 6.0]);
     }
 
     #[test]
     fn first_query_attends_only_to_itself() {
         // two positions, one head of dim 2. Row 0 (n_past=0) may see only key 0,
         // so its output is value row 0 regardless of key/query values.
-        let q = vec![1.0, 0.0, 0.0, 1.0];
-        let k = vec![9.0, 9.0, -9.0, -9.0];
-        let v = vec![1.0, 2.0, 3.0, 4.0];
-        let out = multi_head_attention(&q, &k, &v, 2, 2, 1, 2);
-        assert_eq!(&out.data()[0..2], &[1.0, 2.0]);
+        let q = [1.0, 0.0, 0.0, 1.0];
+        let k = [9.0, 9.0, -9.0, -9.0];
+        let v = [1.0, 2.0, 3.0, 4.0];
+        let out = attend(&q, &k, &v, 2, 2, 1, 2);
+        assert_eq!(&out[0..2], &[1.0, 2.0]);
     }
 
     #[test]
     fn heads_are_independent_column_blocks() {
         // two heads of dim 1, one position: each head's output is its own value.
-        let q = vec![1.0, 1.0];
-        let k = vec![2.0, 2.0];
-        let v = vec![7.0, 8.0];
-        let out = multi_head_attention(&q, &k, &v, 1, 1, 2, 1);
-        assert_eq!(out.data(), &[7.0, 8.0]);
+        let out = attend(&[1.0, 1.0], &[2.0, 2.0], &[7.0, 8.0], 1, 1, 2, 1);
+        assert_eq!(out, &[7.0, 8.0]);
+    }
+
+    #[test]
+    fn decode_step_on_a_grown_cache_uses_the_full_prefix() {
+        // n_new=1 on top of n_past=2, one head of dim 1: with equal keys the
+        // probs are uniform, so the output is the mean of the three values.
+        let q = [1.0];
+        let k = [2.0, 2.0, 2.0];
+        let v = [3.0, 6.0, 9.0];
+        let out = attend(&q, &k, &v, 1, 3, 1, 1);
+        assert!((out[0] - 6.0).abs() < 1e-6);
     }
 }

@@ -1,4 +1,4 @@
-use crate::tensor::Tensor;
+use crate::tensor::{Tensor, TensorViewMut};
 
 /// sqrt(2/pi), matching ggml's constant to f32 precision.
 const SQRT_2_OVER_PI: f32 = 0.797_884_6;
@@ -9,15 +9,23 @@ fn gelu_scalar(x: f32) -> f32 {
     0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh())
 }
 
-impl Tensor {
-    /// Elementwise GELU using the tanh approximation ggml applies to GPT-2's
-    /// FFN.
-    #[hotpath::measure]
-    pub fn gelu(&self) -> Tensor {
-        let mut out = self.clone();
-        for slot in out.data_mut() {
+/// Elementwise GELU in place, using the tanh approximation ggml applies to
+/// GPT-2's FFN.
+#[hotpath::measure]
+pub fn gelu(mut x: TensorViewMut) {
+    for r in 0..x.rows() {
+        for slot in x.row_mut(r) {
             *slot = gelu_scalar(*slot);
         }
+    }
+}
+
+impl Tensor {
+    /// Elementwise GELU into a fresh tensor, delegating to the in-place
+    /// [`gelu`] over a view.
+    pub fn gelu(&self) -> Tensor {
+        let mut out = self.clone();
+        gelu(out.as_view_mut());
         out
     }
 }

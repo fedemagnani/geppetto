@@ -1,24 +1,31 @@
-use crate::tensor::{Shape, Tensor};
+use crate::tensor::{Shape, Tensor, TensorView, TensorViewMut};
+
+/// Gathers rows `ids` from `table` (an `[n_rows, cols]` matrix) into `out`
+/// (`[ids.len(), cols]`, fully overwritten). This is `ggml_get_rows`: the
+/// embedding lookup that turns token ids into rows of the embedding table,
+/// and also how the graph selects the output positions to keep.
+#[hotpath::measure]
+pub fn get_rows(table: TensorView, ids: &[u32], mut out: TensorViewMut) {
+    let n_rows = table.rows();
+    let expected = Shape::new(ids.len(), table.cols());
+    assert_eq!(out.shape(), expected, "get_rows: out shape mismatch");
+    for (r, &id) in ids.iter().enumerate() {
+        let id = id as usize;
+        assert!(
+            id < n_rows,
+            "get_rows: id {id} out of range for {n_rows} rows"
+        );
+        out.row_mut(r).copy_from_slice(table.row(id));
+    }
+}
 
 impl Tensor {
-    /// Gathers rows `ids` from `self` (an `[n_rows, cols]` matrix), producing
-    /// `[ids.len(), cols]`. This is `ggml_get_rows`: the embedding lookup that
-    /// turns token ids into rows of the embedding table, and also how the graph
-    /// selects the output positions to keep.
-    #[hotpath::measure]
+    /// Gathers rows `ids` from `self` into a fresh tensor, delegating to
+    /// [`get_rows`].
     pub fn get_rows(&self, ids: &[u32]) -> Tensor {
-        let cols = self.cols();
-        let n_rows = self.rows();
-        let mut out = vec![0.0f32; ids.len() * cols];
-        for (dst, &id) in out.chunks_mut(cols).zip(ids) {
-            let id = id as usize;
-            assert!(
-                id < n_rows,
-                "get_rows: id {id} out of range for {n_rows} rows"
-            );
-            dst.copy_from_slice(self.row(id));
-        }
-        Tensor::new(Shape::new(ids.len(), cols), out)
+        let mut out = Tensor::zeros(Shape::new(ids.len(), self.cols()));
+        get_rows(self.as_view(), ids, out.as_view_mut());
+        out
     }
 }
 

@@ -1,4 +1,37 @@
-use crate::tensor::Tensor;
+use crate::tensor::{Tensor, TensorView, TensorViewMut};
+
+/// Row-normalizes `input` into `out`.
+///
+/// For each row `x`: `(x - mean) / sqrt(var + eps)`, then elementwise
+/// `* weight + bias`. `var` is the biased (population) variance. Never in
+/// place: callers need `input` (the residual stream) to survive.
+#[hotpath::measure]
+pub fn norm(
+    input: TensorView,
+    weight: TensorView,
+    bias: TensorView,
+    eps: f32,
+    mut out: TensorViewMut,
+) {
+    let cols = input.cols();
+    assert_eq!(weight.rows(), 1, "layernorm: weight must be one row");
+    assert_eq!(bias.rows(), 1, "layernorm: bias must be one row");
+    assert_eq!(weight.cols(), cols, "layernorm: weight width mismatch");
+    assert_eq!(bias.cols(), cols, "layernorm: bias width mismatch");
+    assert_eq!(out.shape(), input.shape(), "layernorm: out shape mismatch");
+
+    let (w, b) = (weight.row(0), bias.row(0));
+    for r in 0..input.rows() {
+        let src = input.row(r);
+        let dst = out.row_mut(r);
+        let mean = src.iter().sum::<f32>() / cols as f32;
+        let var = src.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / cols as f32;
+        let inv_std = 1.0 / (var + eps).sqrt();
+        for (((slot, &x), &wi), &bi) in dst.iter_mut().zip(src).zip(w).zip(b) {
+            *slot = (x - mean) * inv_std * wi + bi;
+        }
+    }
+}
 
 pub struct NormLayer<'a> {
     weight: &'a Tensor,
@@ -11,28 +44,13 @@ impl<'a> NormLayer<'a> {
         Self { weight, bias, eps }
     }
 
-    /// Normalizes each row of `input`
-    ///
-    /// For each row `x`: `(x - mean) / sqrt(var + eps)`, then elementwise
-    /// `* weight + bias`. `var` is the biased (population) variance.
-    #[hotpath::measure]
+    /// Normalizes each row of `input` into a fresh tensor, delegating to
+    /// [`norm`].
     pub fn forward(&self, input: &Tensor) -> Tensor {
-        let cols = input.cols();
-        assert_eq!(self.weight.rows(), 1, "layernorm: weight must be one row");
-        assert_eq!(self.bias.rows(), 1, "layernorm: bias must be one row");
-        assert_eq!(self.weight.cols(), cols, "layernorm: weight width mismatch");
-        assert_eq!(self.bias.cols(), cols, "layernorm: bias width mismatch");
-
-        let (w, b) = (self.weight.row(0), self.bias.row(0));
-        let mut out = input.clone();
-        for row in out.rows_mut() {
-            let mean = row.iter().sum::<f32>() / cols as f32;
-            let var = row.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / cols as f32;
-            let inv_std = 1.0 / (var + self.eps).sqrt();
-            for ((slot, &wi), &bi) in row.iter_mut().zip(w).zip(b) {
-                *slot = (*slot - mean) * inv_std * wi + bi;
-            }
-        }
+        let mut out = Tensor::zeros(input.shape());
+        let weight = self.weight.as_view();
+        let bias = self.bias.as_view();
+        norm(input.as_view(), weight, bias, self.eps, out.as_view_mut());
         out
     }
 }

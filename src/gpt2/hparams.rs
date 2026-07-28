@@ -1,6 +1,5 @@
 use crate::gguf::GgufFile;
 use crate::gpt2::ModelError;
-use crate::kv_cache::KvCache;
 
 /// GPT-2 hyperparameters read from the `gpt2.*` metadata keys. `n_vocab` is not
 /// here: it is derived from the token-embedding tensor when weights load, since
@@ -75,10 +74,5 @@ impl HParams {
             ));
         }
         Ok(())
-    }
-
-    /// A fresh, empty KV cache sized for this model.
-    pub fn new_kv_cache(&self) -> KvCache {
-        KvCache::new(self.n_layer, self.n_embd, self.n_ctx)
     }
 }

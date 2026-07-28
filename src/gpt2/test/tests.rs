@@ -1,7 +1,6 @@
 use super::tiny::{TinyConfig, TinyModelData};
 use crate::gguf::GgufFile;
 use crate::gpt2::{Gpt2Model, ModelError};
-use crate::tensor::Tensor;
 
 fn tiny_model(include_output: bool) -> Gpt2Model {
     let data = TinyModelData::generate(TinyConfig::small(), 0xC0FFEE);
@@ -10,10 +9,11 @@ fn tiny_model(include_output: bool) -> Gpt2Model {
     Gpt2Model::from_gguf(&file).expect("tiny gguf loads")
 }
 
-/// Logits of a full-prompt forward pass from a fresh cache.
-fn logits_full(model: &Gpt2Model, tokens: &[u32]) -> Tensor {
-    let mut cache = model.new_kv_cache();
-    model.forward(&mut cache, tokens).expect("forward")
+/// Last-position logits of a full-prompt forward pass from a fresh state.
+fn logits_full(model: &Gpt2Model, tokens: &[u32]) -> Vec<f32> {
+    let mut state = model.new_state();
+    let logits = model.forward(&mut state, tokens).expect("forward");
+    logits.to_vec()
 }
 
 fn assert_close(a: &[f32], b: &[f32], tol: f32) {
@@ -39,9 +39,8 @@ fn loads_hparams_and_shapes() {
 fn forward_returns_finite_logits_of_the_right_shape() {
     let model = tiny_model(true);
     let logits = logits_full(&model, &[1, 2, 3, 4]);
-    assert_eq!(logits.shape().rows(), 4);
-    assert_eq!(logits.shape().cols(), 11);
-    assert!(logits.data().iter().all(|x| x.is_finite()));
+    assert_eq!(logits.len(), 11);
+    assert!(logits.iter().all(|x| x.is_finite()));
 }
 
 #[test]
@@ -49,36 +48,25 @@ fn forward_is_deterministic() {
     let model = tiny_model(true);
     let a = logits_full(&model, &[5, 1, 9, 2]);
     let b = logits_full(&model, &[5, 1, 9, 2]);
-    assert_eq!(a.data(), b.data());
-}
-
-#[test]
-fn earlier_logits_are_unchanged_by_later_tokens() {
-    // causality: appending a token must not change the logits at earlier
-    // positions.
-    let model = tiny_model(true);
-    let short = logits_full(&model, &[3, 1, 4]);
-    let long = logits_full(&model, &[3, 1, 4, 1, 5]);
-    for i in 0..short.shape().rows() {
-        assert_close(short.row(i), long.row(i), 1e-5);
-    }
+    assert_eq!(a, b);
 }
 
 #[test]
 fn incremental_decoding_matches_a_full_forward() {
     // the strongest correctness lever without golden outputs: feeding tokens
-    // one at a time through the cache must reproduce the full-prompt logits.
+    // one at a time through the cache must reproduce, at every step, the
+    // logits of a fresh full pass over the same prefix. This is also the
+    // causality check: the full prefix pass cannot see the later tokens.
     let model = tiny_model(true);
     let tokens = [7, 2, 10, 0, 5, 3];
-    let full = logits_full(&model, &tokens);
 
-    let mut cache = model.new_kv_cache();
+    let mut state = model.new_state();
     for (i, &token) in tokens.iter().enumerate() {
-        let step = model.forward(&mut cache, &[token]).unwrap();
-        assert_eq!(step.shape().rows(), 1);
-        assert_close(step.row(0), full.row(i), 1e-4);
+        let step = model.forward(&mut state, &[token]).unwrap().to_vec();
+        let full = logits_full(&model, &tokens[..=i]);
+        assert_close(&step, &full, 1e-4);
     }
-    assert_eq!(cache.len(), tokens.len());
+    assert_eq!(state.n_past(), tokens.len());
 }
 
 #[test]
@@ -89,12 +77,22 @@ fn chunked_prefill_matches_a_full_forward() {
     let tokens = [4, 8, 1, 6, 2];
     let full = logits_full(&model, &tokens);
 
-    let mut cache = model.new_kv_cache();
-    model.forward(&mut cache, &tokens[..2]).unwrap();
-    let tail = model.forward(&mut cache, &tokens[2..]).unwrap();
-    for (i, row) in (2..tokens.len()).zip(0..) {
-        assert_close(tail.row(row), full.row(i), 1e-4);
-    }
+    let mut state = model.new_state();
+    model.forward(&mut state, &tokens[..2]).unwrap();
+    let tail = model.forward(&mut state, &tokens[2..]).unwrap();
+    assert_close(tail, &full, 1e-4);
+}
+
+#[test]
+fn clear_resets_the_state_for_reuse() {
+    // after a clear, the same arena must reproduce a fresh run exactly: no
+    // stale KV position may leak into the new sequence
+    let model = tiny_model(true);
+    let mut state = model.new_state();
+    let a = model.forward(&mut state, &[1, 2, 3]).unwrap().to_vec();
+    state.clear();
+    let b = model.forward(&mut state, &[1, 2, 3]).unwrap().to_vec();
+    assert_eq!(a, b);
 }
 
 #[test]
@@ -104,7 +102,7 @@ fn tied_output_matches_explicit_output_weight() {
     let tokens = [1, 5, 2, 8];
     let tied = logits_full(&tiny_model(false), &tokens);
     let explicit = logits_full(&tiny_model(true), &tokens);
-    assert_close(tied.data(), explicit.data(), 0.0);
+    assert_close(&tied, &explicit, 0.0);
 }
 
 #[test]
@@ -135,9 +133,9 @@ fn wrong_architecture_is_rejected() {
 #[test]
 fn token_out_of_range_is_a_typed_error() {
     let model = tiny_model(true);
-    let mut cache = model.new_kv_cache();
+    let mut state = model.new_state();
     assert!(matches!(
-        model.forward(&mut cache, &[999]),
+        model.forward(&mut state, &[999]),
         Err(ModelError::TokenOutOfRange {
             token: 999,
             n_vocab: 11

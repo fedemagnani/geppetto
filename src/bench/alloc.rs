@@ -73,7 +73,15 @@ pub const fn is_installed() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// The two tests below read exact deltas of the shared counters while
+    /// driving the allocator directly; run concurrently they see each other's
+    /// bumps. Serialize them (ignoring poisoning: a failed test must not fail
+    /// the other one spuriously).
+    static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn deltas_subtract_the_baseline() {
@@ -112,6 +120,7 @@ mod tests {
     /// harness. So drive the counting logic directly.
     #[test]
     fn allocating_through_the_counter_moves_it() {
+        let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let layout = Layout::from_size_align(4096, 8).expect("valid layout");
         let before = AllocStats::now();
 
@@ -128,6 +137,7 @@ mod tests {
 
     #[test]
     fn reallocating_counts_as_a_further_allocation() {
+        let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let layout = Layout::from_size_align(64, 8).expect("valid layout");
         // SAFETY: non-zero-sized layout; the pointer is grown then freed with
         // the layout each call requires.

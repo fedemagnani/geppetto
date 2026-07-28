@@ -14,17 +14,16 @@ mod test;
 pub use error::GenerateError;
 pub use stream::Utf8Stream;
 
-use crate::gpt2::Gpt2Model;
-use crate::kv_cache::KvCache;
+use crate::gpt2::{Gpt2Model, Gpt2State};
 use crate::sampling::Sampler;
 use crate::tokenizer::TokenId;
 
-/// Drives one sequence: owns its KV cache and sampler, and forwards the
-/// prompt on the first step and a single token on each step after.
+/// Drives one sequence: owns its inference state and sampler, and forwards
+/// the prompt on the first step and a single token on each step after.
 pub struct Generator<'a> {
     model: &'a Gpt2Model,
     sampler: Sampler,
-    cache: KvCache,
+    state: Gpt2State,
     config: GenerationConfig,
     /// Tokens to feed on the next step: the whole prompt first, then the token
     /// just sampled. Reused rather than reallocated per step.
@@ -56,15 +55,14 @@ impl<'a> Generator<'a> {
         if self.generated >= self.config.max_new_tokens {
             return Ok(self.stop_with(StopReason::MaxTokens));
         }
-        if self.cache.len() + self.input.len() > self.model.hparams().n_ctx {
+        if self.state.n_past() + self.input.len() > self.model.hparams().n_ctx {
             return Ok(self.stop_with(StopReason::ContextFull));
         }
 
-        let logits = self.model.forward(&mut self.cache, &self.input)?;
-        // only the last position predicts the next token; the earlier rows of a
-        // prefill are computed but unused
-        let last = logits.row(logits.rows() - 1);
-        let token = self.sampler.sample(last)?;
+        // the logits are the last position's row, borrowed straight from the
+        // state's arena -- earlier prefill positions predict nothing
+        let logits = self.model.forward(&mut self.state, &self.input)?;
+        let token = self.sampler.sample(logits)?;
 
         self.generated += 1;
         self.input.clear();
@@ -94,7 +92,7 @@ impl<'a> Generator<'a> {
         }
 
         Ok(Generator {
-            cache: model.new_kv_cache(),
+            state: model.new_state(),
             model,
             sampler,
             config,
@@ -113,8 +111,8 @@ impl<'a> Generator<'a> {
         self.generated
     }
 
-    pub const fn cache(&self) -> &KvCache {
-        &self.cache
+    pub const fn state(&self) -> &Gpt2State {
+        &self.state
     }
 
     fn stop_with(&mut self, reason: StopReason) -> Option<TokenId> {
