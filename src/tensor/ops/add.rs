@@ -1,6 +1,9 @@
+#[cfg(test)]
 use std::ops::{Add, AddAssign};
 
-use crate::tensor::{Tensor, TensorView, TensorViewMut};
+#[cfg(test)]
+use crate::tensor::Tensor;
+use crate::tensor::{TensorView, TensorViewMut};
 
 /// `out += rhs`, elementwise and in place. `rhs` is either the same shape as
 /// `out` or a single row (`[1, out.cols()]`) broadcast across every row --
@@ -32,6 +35,7 @@ pub fn add(mut out: TensorViewMut, rhs: TensorView) {
 }
 
 /// `self += rhs`, delegating to [`add`]; `self`'s shape is unchanged.
+#[cfg(test)]
 impl AddAssign<&Tensor> for Tensor {
     fn add_assign(&mut self, rhs: &Tensor) {
         add(self.as_view_mut(), rhs.as_view());
@@ -40,6 +44,7 @@ impl AddAssign<&Tensor> for Tensor {
 
 /// `self + rhs`, delegating to [`AddAssign`]. The owned `self` variant reuses
 /// its buffer; the `&Tensor` variant clones it first.
+#[cfg(test)]
 impl Add<&Tensor> for Tensor {
     type Output = Tensor;
 
@@ -49,6 +54,7 @@ impl Add<&Tensor> for Tensor {
     }
 }
 
+#[cfg(test)]
 impl Add<&Tensor> for &Tensor {
     type Output = Tensor;
 

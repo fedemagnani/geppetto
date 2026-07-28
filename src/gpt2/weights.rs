@@ -1,40 +1,42 @@
 use crate::gguf::GgufFile;
 use crate::gpt2::{HParams, ModelError};
-use crate::tensor::Tensor;
+use crate::tensor::WeightTensor;
 
-/// The weights of one transformer block, all converted to f32 tensors. Linear
-/// weights are `[n_out, n_in]` (the ggml convention `Tensor`'s `*` expects);
-/// norm weights and biases are single rows.
+/// The weights of one transformer block. Linear weights are `[n_out, n_in]`
+/// (the ggml convention [`crate::tensor::matmul`] expects); norm weights and
+/// biases are single rows. F32 tensors borrow the file mapping, F16 ones are
+/// widened at load -- see [`WeightTensor`].
 pub struct Gpt2TransformerWeights {
-    pub attn_norm_w: Tensor,
-    pub attn_norm_b: Tensor,
-    pub attn_qkv_w: Tensor,
-    pub attn_qkv_b: Tensor,
-    pub attn_out_w: Tensor,
-    pub attn_out_b: Tensor,
-    pub ffn_norm_w: Tensor,
-    pub ffn_norm_b: Tensor,
-    pub ffn_up_w: Tensor,
-    pub ffn_up_b: Tensor,
-    pub ffn_down_w: Tensor,
-    pub ffn_down_b: Tensor,
+    pub attn_norm_w: WeightTensor,
+    pub attn_norm_b: WeightTensor,
+    pub attn_qkv_w: WeightTensor,
+    pub attn_qkv_b: WeightTensor,
+    pub attn_out_w: WeightTensor,
+    pub attn_out_b: WeightTensor,
+    pub ffn_norm_w: WeightTensor,
+    pub ffn_norm_b: WeightTensor,
+    pub ffn_up_w: WeightTensor,
+    pub ffn_up_b: WeightTensor,
+    pub ffn_down_w: WeightTensor,
+    pub ffn_down_b: WeightTensor,
 }
 
 /// All model weights. `output` is the unembedding; when the file omits
-/// `output.weight` it is tied to `token_embd` (GPT-2 shares them).
+/// `output.weight` it is tied to `token_embd` (GPT-2 shares them, and the
+/// clone shares storage rather than copying).
 pub struct Gpt2Weights {
     /// A matrix [vocabulary_size, embedding_dimension]: each row represents a vector embedding
     /// associated with a specific token.
-    pub token_embd: Tensor,
+    pub token_embd: WeightTensor,
     /// A matrix [context_length, embedding_dimension]: positional embeddings added to the \
     /// initial input embedding vectors.
-    pub pos_embd: Tensor,
-    pub output_norm_w: Tensor,
-    pub output_norm_b: Tensor,
+    pub pos_embd: WeightTensor,
+    pub output_norm_w: WeightTensor,
+    pub output_norm_b: WeightTensor,
     /// A matrix [embedding_dimension, vocabulary_size]: this is needed to map each embedding vector
     /// into a vector having the same length of vocabulary size, so that it can be later turned into
     /// a discrete probability distribution to pick the next predicted token
-    pub output: Tensor,
+    pub output: WeightTensor,
     /// The transformer blocks used to transform embedding vectors
     pub layers: Vec<Gpt2TransformerWeights>,
 }

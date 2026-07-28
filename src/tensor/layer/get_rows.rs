@@ -1,4 +1,6 @@
-use crate::tensor::{Shape, Tensor, TensorView, TensorViewMut};
+#[cfg(test)]
+use crate::tensor::Tensor;
+use crate::tensor::{Shape, TensorView, TensorViewMut};
 
 /// Gathers rows `ids` from `table` (an `[n_rows, cols]` matrix) into `out`
 /// (`[ids.len(), cols]`, fully overwritten). This is `ggml_get_rows`: the
@@ -19,6 +21,7 @@ pub fn get_rows(table: TensorView, ids: &[u32], mut out: TensorViewMut) {
     }
 }
 
+#[cfg(test)]
 impl Tensor {
     /// Gathers rows `ids` from `self` into a fresh tensor, delegating to
     /// [`get_rows`].

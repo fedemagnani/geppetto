@@ -13,7 +13,7 @@ model := "models/gpt2-f16.gguf"
 # positional-arguments + "$@" keeps a quoted multi-word prompt as one argument.
 [positional-arguments]
 run *args:
-    cargo run --release --bin generate -- {{model}} "$@"
+    cargo run --release --bin generate --features hotpath,hotpath-alloc -- {{model}} "$@"
 
 # Per-function timing and allocation attribution. Perturbs the timings, so
 # never record these as KPIs.

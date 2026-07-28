@@ -1,7 +1,11 @@
+#[cfg(test)]
 use std::mem;
+#[cfg(test)]
 use std::ops::{Mul, MulAssign};
 
-use crate::tensor::{Shape, Tensor, TensorView, TensorViewMut};
+#[cfg(test)]
+use crate::tensor::Tensor;
+use crate::tensor::{Shape, TensorView, TensorViewMut};
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -98,6 +102,7 @@ pub fn matmul_nn_causal(a: TensorView, b: TensorView, mut out: TensorViewMut, n_
 
 /// The [`matmul`] weight convention, exposed as `*` on owned tensors:
 /// allocates the `[m, n]` output and delegates.
+#[cfg(test)]
 impl Mul<&Tensor> for &Tensor {
     type Output = Tensor;
 
@@ -118,8 +123,8 @@ impl Mul<&Tensor> for &Tensor {
 /// happens (the common shrink is the FFN-down projection); when `n > k` the
 /// buffer must grow once, and rows are filled back-to-front so a write never
 /// lands on a source row still to be read.
+#[cfg(test)]
 impl MulAssign<&Tensor> for Tensor {
-    #[hotpath::measure]
     fn mul_assign(&mut self, rhs: &Tensor) {
         let (m, k, n) = (self.rows(), self.cols(), rhs.rows());
         assert_eq!(

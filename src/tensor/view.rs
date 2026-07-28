@@ -48,7 +48,7 @@ fn check(len: usize, shape: Shape, row_stride: usize) {
 
 impl<'a> TensorView<'a> {
     /// Contiguous view: rows packed back to back.
-    pub fn new(data: &'a [f32], shape: Shape) -> TensorView<'a> {
+    pub fn contiguous(data: &'a [f32], shape: Shape) -> TensorView<'a> {
         TensorView::strided(data, shape, shape.cols())
     }
 
@@ -91,7 +91,7 @@ impl<'a> TensorView<'a> {
 
 impl<'a> TensorViewMut<'a> {
     /// Contiguous view: rows packed back to back.
-    pub fn new(data: &'a mut [f32], shape: Shape) -> TensorViewMut<'a> {
+    pub fn contiguous(data: &'a mut [f32], shape: Shape) -> TensorViewMut<'a> {
         TensorViewMut::strided(data, shape, shape.cols())
     }
 
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn contiguous_rows_round_trip() {
         let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let v = TensorView::new(&data, Shape::new(2, 3));
+        let v = TensorView::contiguous(&data, Shape::new(2, 3));
         assert!(v.is_contiguous());
         assert_eq!(v.row(0), &[1.0, 2.0, 3.0]);
         assert_eq!(v.row(1), &[4.0, 5.0, 6.0]);
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn empty_shape_takes_empty_data() {
-        let v = TensorView::new(&[], Shape::new(0, 5));
+        let v = TensorView::contiguous(&[], Shape::new(0, 5));
         assert_eq!(v.rows(), 0);
     }
 
@@ -215,7 +215,7 @@ mod tests {
     #[should_panic(expected = "does not fit")]
     fn length_mismatch_panics() {
         let data = [0.0; 5];
-        let _ = TensorView::new(&data, Shape::new(2, 3));
+        let _ = TensorView::contiguous(&data, Shape::new(2, 3));
     }
 
     #[test]

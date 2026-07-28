@@ -7,11 +7,11 @@ use crate::tensor::{Shape, TensorView, TensorViewMut, add, gelu, matmul};
 /// Mounts the `[rows, cols]` active prefix of a scratch region; never the
 /// whole worst-case carve.
 fn prefix(region: &[f32], rows: usize, cols: usize) -> TensorView<'_> {
-    TensorView::new(&region[..rows * cols], Shape::new(rows, cols))
+    TensorView::contiguous(&region[..rows * cols], Shape::new(rows, cols))
 }
 
 fn prefix_mut(region: &mut [f32], rows: usize, cols: usize) -> TensorViewMut<'_> {
-    TensorViewMut::new(&mut region[..rows * cols], Shape::new(rows, cols))
+    TensorViewMut::contiguous(&mut region[..rows * cols], Shape::new(rows, cols))
 }
 
 impl Gpt2Model {
@@ -67,14 +67,14 @@ impl Gpt2Model {
         /////////////////////////////
         // Compute embeddings + positional encodings
         get_rows(
-            w.token_embd.as_view(),
+            w.token_embd.view(),
             tokens,
             prefix_mut(views.x, n_new, n_embd),
         );
         // consecutive positions are consecutive rows of pos_embd: the gather
         // collapses to one contiguous block
         let pos_block = &w.pos_embd.data()[n_past * n_embd..n_kv * n_embd];
-        let pos = TensorView::new(pos_block, Shape::new(n_new, n_embd));
+        let pos = TensorView::contiguous(pos_block, Shape::new(n_new, n_embd));
         add(prefix_mut(views.x, n_new, n_embd), pos);
 
         // evaluate each transformer block
@@ -84,8 +84,8 @@ impl Gpt2Model {
             poison(views.norm_out);
             norm(
                 prefix(views.x, n_new, n_embd),
-                layer.attn_norm_w.as_view(),
-                layer.attn_norm_b.as_view(),
+                layer.attn_norm_w.view(),
+                layer.attn_norm_b.view(),
                 hp.eps,
                 prefix_mut(views.norm_out, n_new, n_embd),
             );
@@ -96,10 +96,10 @@ impl Gpt2Model {
             let mut qkv = prefix_mut(views.qkv, n_new, qkv_width);
             matmul(
                 prefix(views.norm_out, n_new, n_embd),
-                layer.attn_qkv_w.as_view(),
+                layer.attn_qkv_w.view(),
                 qkv.reborrow(),
             );
-            add(qkv, layer.attn_qkv_b.as_view());
+            add(qkv, layer.attn_qkv_b.view());
 
             for (i, row) in views.qkv.chunks_exact(qkv_width).take(n_new).enumerate() {
                 let k_row = &row[n_embd..2 * n_embd];
@@ -125,10 +125,10 @@ impl Gpt2Model {
             let mut proj = prefix_mut(views.proj_out, n_new, n_embd);
             matmul(
                 prefix(views.attn_out, n_new, n_embd),
-                layer.attn_out_w.as_view(),
+                layer.attn_out_w.view(),
                 proj.reborrow(),
             );
-            add(proj, layer.attn_out_b.as_view());
+            add(proj, layer.attn_out_b.view());
 
             /////////////////////////////
             // Residual connections
@@ -142,8 +142,8 @@ impl Gpt2Model {
             poison(views.norm_out);
             norm(
                 prefix(views.x, n_new, n_embd),
-                layer.ffn_norm_w.as_view(),
-                layer.ffn_norm_b.as_view(),
+                layer.ffn_norm_w.view(),
+                layer.ffn_norm_b.view(),
                 hp.eps,
                 prefix_mut(views.norm_out, n_new, n_embd),
             );
@@ -152,20 +152,20 @@ impl Gpt2Model {
             let mut up = prefix_mut(views.ffn_up, n_new, hp.n_ff);
             matmul(
                 prefix(views.norm_out, n_new, n_embd),
-                layer.ffn_up_w.as_view(),
+                layer.ffn_up_w.view(),
                 up.reborrow(),
             );
-            add(up.reborrow(), layer.ffn_up_b.as_view());
+            add(up.reborrow(), layer.ffn_up_b.view());
             gelu(up);
 
             poison(views.proj_out);
             let mut down = prefix_mut(views.proj_out, n_new, n_embd);
             matmul(
                 prefix(views.ffn_up, n_new, hp.n_ff),
-                layer.ffn_down_w.as_view(),
+                layer.ffn_down_w.view(),
                 down.reborrow(),
             );
-            add(down, layer.ffn_down_b.as_view());
+            add(down, layer.ffn_down_b.view());
 
             /////////////////////////////
             // Residual connections
@@ -180,9 +180,9 @@ impl Gpt2Model {
         poison(views.norm_out);
         let last_row = &views.x[(n_new - 1) * n_embd..n_new * n_embd];
         norm(
-            TensorView::new(last_row, Shape::new(1, n_embd)),
-            w.output_norm_w.as_view(),
-            w.output_norm_b.as_view(),
+            TensorView::contiguous(last_row, Shape::new(1, n_embd)),
+            w.output_norm_w.view(),
+            w.output_norm_b.view(),
             hp.eps,
             prefix_mut(views.norm_out, 1, n_embd),
         );
@@ -191,7 +191,7 @@ impl Gpt2Model {
         // Unembedding into the logits region
         matmul(
             prefix(views.norm_out, 1, n_embd),
-            w.output.as_view(),
+            w.output.view(),
             prefix_mut(views.logits, 1, n_vocab),
         );
 

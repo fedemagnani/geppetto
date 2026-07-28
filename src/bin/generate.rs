@@ -52,6 +52,7 @@ impl Cli {
     }
 }
 
+#[hotpath::main]
 fn main() -> ExitCode {
     let args = Cli::parse();
     match run(&args) {

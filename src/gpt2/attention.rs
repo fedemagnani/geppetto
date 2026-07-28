@@ -54,20 +54,27 @@ pub fn multi_head_attention(
         poison(scores);
         let scores_prefix = &mut scores[..n_new * n_kv];
         let scores_shape = Shape::new(n_new, n_kv);
-        matmul(q_h, k_h, TensorViewMut::new(scores_prefix, scores_shape));
+        matmul(
+            q_h,
+            k_h,
+            TensorViewMut::contiguous(scores_prefix, scores_shape),
+        );
         for (i, row) in scores_prefix.chunks_exact_mut(n_kv).enumerate() {
             let bound = (n_past + i + 1).min(n_kv);
             for s in &mut row[..bound] {
                 *s *= scale;
             }
         }
-        softmax_causal(TensorViewMut::new(scores_prefix, scores_shape), n_past);
+        softmax_causal(
+            TensorViewMut::contiguous(scores_prefix, scores_shape),
+            n_past,
+        );
 
         let v_block = &values[off..(n_kv - 1) * n_embd + off + head_dim];
         let v_h = TensorView::strided(v_block, head_shape(n_kv), n_embd);
         let out_block = &mut attn_out[off..(n_new - 1) * n_embd + off + head_dim];
         let out_h = TensorViewMut::strided(out_block, head_shape(n_new), n_embd);
-        let probs = TensorView::new(&scores[..n_new * n_kv], scores_shape);
+        let probs = TensorView::contiguous(&scores[..n_new * n_kv], scores_shape);
         matmul_nn_causal(probs, v_h, out_h, n_past);
     }
 }

@@ -1,4 +1,6 @@
-use crate::tensor::{Tensor, TensorViewMut};
+#[cfg(test)]
+use crate::tensor::Tensor;
+use crate::tensor::TensorViewMut;
 
 /// Per-row softmax over the full row width, in place. Numerically stabilized
 /// by subtracting each row's max before exponentiating.
@@ -36,12 +38,12 @@ pub fn softmax_causal(mut x: TensorViewMut, n_past: usize) {
     }
 }
 
+#[cfg(test)]
 impl Tensor {
     /// Per-row softmax into a fresh tensor. When `mask` is given (same shape
     /// as `self`) it is added first -- the additive attention mask, whose
     /// `-inf` entries zero out disallowed positions. The maskless case
     /// delegates to the in-place [`softmax`] over a view.
-    #[hotpath::measure]
     pub fn softmax(&self, mask: Option<&Tensor>) -> Tensor {
         let mut out = self.clone();
         let Some(mask) = mask else {

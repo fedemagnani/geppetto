@@ -1,4 +1,6 @@
-use crate::tensor::{Tensor, TensorViewMut};
+#[cfg(test)]
+use crate::tensor::Tensor;
+use crate::tensor::TensorViewMut;
 
 /// sqrt(2/pi), matching ggml's constant to f32 precision.
 const SQRT_2_OVER_PI: f32 = 0.797_884_6;
@@ -20,6 +22,7 @@ pub fn gelu(mut x: TensorViewMut) {
     }
 }
 
+#[cfg(test)]
 impl Tensor {
     /// Elementwise GELU into a fresh tensor, delegating to the in-place
     /// [`gelu`] over a view.

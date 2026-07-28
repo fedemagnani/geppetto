@@ -1,10 +1,10 @@
 //! CPU tensors and the ops the GPT-2 forward pass is built from.
 //!
-//! A [`Tensor`] is a 2D, row-major, owned `Vec<f32>` -- activations and
-//! weights alike. Weights arriving as raw GGUF bytes are converted to f32 at
-//! construction: F32 is copied, F16 is widened. That is correctness-first; the
-//! zero-copy F32 borrow and per-tile F16 dequant the plan mentions are an
-//! epoch-6 optimization. Quantized dtypes plug in at [`Tensor::from_bytes`].
+//! The hot path works entirely over borrowed views: ops are free functions
+//! consuming [`TensorView`]/[`TensorViewMut`] mounted over the arena, and
+//! model weights are [`WeightTensor`]s backed by the mmap'd GGUF file.
+//! `Tensor` -- the owned `Vec<f32>` variant -- survives only as test/bench
+//! support (ergonomic construction of small operands) and is on its way out.
 
 mod activation;
 mod dtype;
@@ -13,6 +13,7 @@ pub mod layer;
 mod ops;
 mod shape;
 mod view;
+mod weight;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -23,6 +24,7 @@ pub use error::TensorError;
 pub use ops::{add, matmul, matmul_nn, matmul_nn_causal};
 pub use shape::Shape;
 pub use view::{TensorView, TensorViewMut};
+pub use weight::WeightTensor;
 
 /// Size in bytes of a contiguous row of `n_elements` stored as `dtype`.
 ///
@@ -42,14 +44,17 @@ pub const fn row_size(dtype: DType, n_elements: usize) -> Result<usize, TensorEr
     Ok(n_elements / block_size * dtype.type_size())
 }
 
-/// A 2D, row-major tensor of f32. See the module docs for why everything is
-/// owned f32 at this epoch.
+/// A 2D, row-major, owned tensor of f32. Test/bench support only -- the hot
+/// path uses [`TensorView`]s over the arena and [`WeightTensor`]s over the
+/// file mapping. Soon to be deprecated; do not add production call sites.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tensor {
     shape: Shape,
     data: Vec<f32>,
 }
 
+#[cfg(test)]
 impl Tensor {
     /// Wraps `data` in `shape`; the two must agree in length.
     pub fn new(shape: Shape, data: Vec<f32>) -> Tensor {
@@ -122,14 +127,15 @@ impl Tensor {
 
     /// Borrows the whole tensor as a contiguous view.
     pub fn as_view(&self) -> TensorView<'_> {
-        TensorView::new(&self.data, self.shape)
+        TensorView::contiguous(&self.data, self.shape)
     }
 
     pub fn as_view_mut(&mut self) -> TensorViewMut<'_> {
-        TensorViewMut::new(&mut self.data, self.shape)
+        TensorViewMut::contiguous(&mut self.data, self.shape)
     }
 }
 
+#[cfg(test)]
 fn byte_count_error(dtype: DType, shape: Shape, got: usize) -> TensorError {
     TensorError::ByteCountMismatch {
         dtype,
@@ -139,6 +145,7 @@ fn byte_count_error(dtype: DType, shape: Shape, got: usize) -> TensorError {
     }
 }
 
+#[cfg(test)]
 fn decode_f32(shape: Shape, bytes: &[u8]) -> Result<Vec<f32>, TensorError> {
     if bytes.len() != shape.len() * DType::F32.type_size() {
         return Err(byte_count_error(DType::F32, shape, bytes.len()));
@@ -149,6 +156,7 @@ fn decode_f32(shape: Shape, bytes: &[u8]) -> Result<Vec<f32>, TensorError> {
         .collect())
 }
 
+#[cfg(test)]
 fn decode_f16(shape: Shape, bytes: &[u8]) -> Result<Vec<f32>, TensorError> {
     if bytes.len() != shape.len() * DType::F16.type_size() {
         return Err(byte_count_error(DType::F16, shape, bytes.len()));

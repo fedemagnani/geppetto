@@ -11,7 +11,7 @@ use crate::{
         ArrayValue, GgufError, MAGIC, MAX_ARRAY_ELEMENTS, MAX_DIMS, MAX_NAME_LEN, TensorInfo,
         Value, ValueType,
     },
-    tensor::Tensor,
+    tensor::WeightTensor,
 };
 
 /// A parsed GGUF file. Metadata and tensor infos are read eagerly; tensor
@@ -172,8 +172,10 @@ impl GgufFile {
         Ok(self.data.slice(start..end))
     }
 
-    /// TODO: possibly redundant with `tensor_data`
-    pub fn tensor_from(&self, name: &str) -> Result<Tensor, GgufError> {
+    /// Binds a tensor as a [`WeightTensor`]: F32 data is borrowed zero-copy
+    /// from the file mapping, F16 is widened once. The mapping stays alive as
+    /// long as any bound weight does (the `Bytes` refcount owns it).
+    pub fn tensor_from(&self, name: &str) -> Result<WeightTensor, GgufError> {
         let info = self
             .tensor(name)
             .ok_or_else(|| GgufError::TensorNotFound(name.into()))?;
@@ -185,7 +187,7 @@ impl GgufFile {
             })?;
         let shape = info.dims_to_shape();
         let bytes = self.tensor_data(name)?;
-        let tensor = Tensor::from_bytes(dtype, shape, bytes.as_ref())?;
+        let tensor = WeightTensor::from_gguf_bytes(dtype, shape, bytes)?;
 
         Ok(tensor)
     }
@@ -196,7 +198,7 @@ impl GgufFile {
         name: &str,
         want_rows: usize,
         want_cols: usize,
-    ) -> Result<Tensor, GgufError> {
+    ) -> Result<WeightTensor, GgufError> {
         let tensor = self.tensor_from(name)?;
         let got_rows = tensor.rows();
         let got_cols = tensor.cols();
@@ -214,9 +216,7 @@ impl GgufFile {
 
     /// Loads a tensor checking only its row width, returning it with whatever row
     /// count the file declares (used for `token_embd`, which fixes `n_vocab`).
-    ///
-    /// TODO: is this really needed? it is just `load` with more loosy checks
-    pub fn load_cols(&self, name: &str, want_cols: usize) -> Result<Tensor, GgufError> {
+    pub fn load_cols(&self, name: &str, want_cols: usize) -> Result<WeightTensor, GgufError> {
         let tensor = self.tensor_from(name)?;
         let got_rows = tensor.rows();
         let got_cols = tensor.cols();

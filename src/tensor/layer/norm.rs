@@ -1,4 +1,6 @@
-use crate::tensor::{Tensor, TensorView, TensorViewMut};
+#[cfg(test)]
+use crate::tensor::Tensor;
+use crate::tensor::{TensorView, TensorViewMut};
 
 /// Row-normalizes `input` into `out`.
 ///
@@ -33,12 +35,14 @@ pub fn norm(
     }
 }
 
+#[cfg(test)]
 pub struct NormLayer<'a> {
     weight: &'a Tensor,
     bias: &'a Tensor,
     eps: f32,
 }
 
+#[cfg(test)]
 impl<'a> NormLayer<'a> {
     pub fn new(weight: &'a Tensor, bias: &'a Tensor, eps: f32) -> Self {
         Self { weight, bias, eps }

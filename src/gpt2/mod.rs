@@ -1,7 +1,7 @@
 //! The GPT-2 model: hyperparameters, weights, and the eager forward pass.
 //!
 //! Reference: `src/models/gpt2.cpp` in llama.cpp. This is a behavioral port --
-//! a direct forward pass over [`crate::tensor::Tensor`] ops -- not a
+//! a direct forward pass over view ops and a pre-allocated arena -- not a
 //! reimplementation of ggml's compute graph.
 
 mod attention;
