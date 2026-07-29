@@ -422,7 +422,7 @@ impl<'a> Cursor<'a> {
 
         if let Some(dtype) = info.dtype() {
             // surface a PartialBlock error now; nbytes() folds it into None
-            crate::tensor::row_size(dtype, info.dims.first().copied().unwrap_or(1) as usize)?;
+            dtype.row_byte_size(info.dims.first().copied().unwrap_or(1) as usize)?;
             if info.nbytes().is_none() {
                 return Err(GgufError::SizeOverflow { name: info.name });
             }

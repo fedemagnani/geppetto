@@ -1,5 +1,5 @@
 use crate::gguf::GgufError;
-use crate::tensor::{DType, Shape, row_size};
+use crate::tensor::{DType, Shape};
 
 /// Mirrors `GGML_MAX_DIMS`.
 pub const MAX_DIMS: usize = 4;
@@ -65,11 +65,9 @@ impl TensorInfo {
     pub fn nbytes(&self) -> Option<u64> {
         let dtype = self.dtype()?;
         let n_rows = self.dims.iter().skip(1).product::<u64>();
-        let row = row_size(
-            dtype,
-            usize::try_from(self.dims.first().copied().unwrap_or(1)).ok()?,
-        )
-        .ok()?;
+        let row = dtype
+            .row_byte_size(usize::try_from(self.dims.first().copied().unwrap_or(1)).ok()?)
+            .ok()?;
         u64::try_from(row).ok()?.checked_mul(n_rows)
     }
 
