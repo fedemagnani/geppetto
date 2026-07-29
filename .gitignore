@@ -1,2 +1,5 @@
 /target
 .DS_STORE
+old
+/models
+/prompts

@@ -4,14 +4,34 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eyre = "0.6.12"
-# tiktoken = { git = "https://github.com/openai/tiktoken", tag = "0.11.0" } # openai tokenizer
-tiktoken-rs = "0.6.0"
-candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.9.1", features = [
-    "metal",
-] }
-candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.9.1", features = [
-    "metal",
-] }
-hf-hub = { git = "https://github.com/huggingface/hf-hub", version = "0.4.3" }
-rand = "0.9.2"
+bytemuck = "1"
+bytes = "1.12.1"
+clap = { version = "4.6.1", features = ["derive"] }
+fancy-regex = "0.18.0"
+half = "2.7.1"
+hotpath = "0.21.5"
+libc = "0.2.187"
+memmap2 = "0.9"
+strum = { version = "0.28.0", features = ["derive"] }
+thiserror = "2"
+
+[features]
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath/hotpath-alloc"]
+hotpath-cpu = ["hotpath/hotpath-cpu"]
+
+[[bin]]
+name = "gguf-inspect"
+path = "src/bin/gguf_inspect.rs"
+
+[[bin]]
+name = "tokenize"
+path = "src/bin/tokenize.rs"
+
+[[bin]]
+name = "generate"
+path = "src/bin/generate.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
