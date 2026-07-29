@@ -33,6 +33,8 @@ pub enum GgufError {
     NameTooLong(usize),
     #[error("tensor '{name}' has {n_dims} dimensions, more than the maximum")]
     TooManyDims { name: String, n_dims: u32 },
+    #[error("tensor '{name}' has a zero dimension")]
+    ZeroDim { name: String },
     #[error("tensor '{name}' shape does not fit in a signed 64-bit element count")]
     ElementsOverflow { name: String },
     #[error("tensor '{name}' size in bytes overflows")]

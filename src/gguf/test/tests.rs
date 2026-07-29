@@ -243,6 +243,19 @@ fn custom_alignment_places_tensors_correctly() {
 }
 
 #[test]
+fn zero_dimensions_are_rejected() {
+    // a zero dim would make a degenerate shape downstream; the parser is the
+    // typed-error boundary for malformed files
+    let bytes = FixtureBuilder::new()
+        .tensor("z", &[0], F32_ID, vec![])
+        .build();
+    assert!(matches!(
+        GgufFile::from_bytes(bytes),
+        Err(GgufError::ZeroDim { name }) if name == "z"
+    ));
+}
+
+#[test]
 fn wrong_tensor_offsets_are_rejected() {
     // second tensor claims offset 0: overlaps the first
     let bytes = FixtureBuilder::new()

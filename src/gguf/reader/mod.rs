@@ -402,6 +402,9 @@ impl<'a> Cursor<'a> {
         let mut n_elements: u64 = 1;
         for _ in 0..n_dims {
             let d = self.read_u64()?;
+            if d == 0 {
+                return Err(GgufError::ZeroDim { name });
+            }
             n_elements = match n_elements.checked_mul(d) {
                 Some(n) if n <= i64::MAX as u64 && d <= i64::MAX as u64 => n,
                 _ => return Err(GgufError::ElementsOverflow { name }),

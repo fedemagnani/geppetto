@@ -20,38 +20,6 @@ use crate::tensor::{DType, Shape, TensorError, TensorView};
 #[cfg(target_endian = "big")]
 compile_error!("GGUF tensor data is little-endian; big-endian targets would need a byte swap");
 
-/// An owned f32 buffer presentable as bytes, so widened weights ride the
-/// same refcounted [`Bytes`] machinery as mapped ones. A `Vec<f32>` is
-/// always f32-aligned, so the round trip through `[u8]` is valid by
-/// construction.
-struct F32Buffer(Vec<f32>);
-
-impl F32Buffer {
-    /// Copies little-endian f32 bytes (the fallback for an unaligned source).
-    fn copy_f32(bytes: &[u8]) -> Bytes {
-        let floats = bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        Bytes::from_owner(F32Buffer(floats))
-    }
-
-    /// Widens little-endian f16 bytes; half -> f32 is exact.
-    fn widen_f16(bytes: &[u8]) -> Bytes {
-        let floats = bytes
-            .chunks_exact(2)
-            .map(|b| half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
-            .collect();
-        Bytes::from_owner(F32Buffer(floats))
-    }
-}
-
-impl AsRef<[u8]> for F32Buffer {
-    fn as_ref(&self) -> &[u8] {
-        bytemuck::cast_slice(&self.0)
-    }
-}
-
 /// A weight matrix, `[rows, cols]` row-major f32 however the file stores it:
 /// one invariant, refcounted bytes viewed as f32. F32 tensor data borrows
 /// the file mapping zero-copy; F16 is widened once at bind into an owned
@@ -113,6 +81,37 @@ impl WeightTensor {
     }
 }
 
+/// An owned f32 buffer presentable as bytes, so widened weights ride the
+/// same refcounted [`Bytes`] machinery as mapped ones. A `Vec<f32>` is
+/// always f32-aligned, so the round trip through `[u8]` is valid by
+/// construction.
+struct F32Buffer(Vec<f32>);
+
+impl F32Buffer {
+    /// Copies little-endian f32 bytes (the fallback for an unaligned source).
+    fn copy_f32(bytes: &[u8]) -> Bytes {
+        let floats = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        Bytes::from_owner(F32Buffer(floats))
+    }
+
+    /// Widens little-endian f16 bytes; half -> f32 is exact.
+    fn widen_f16(bytes: &[u8]) -> Bytes {
+        let floats = bytes
+            .chunks_exact(2)
+            .map(|b| half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
+            .collect();
+        Bytes::from_owner(F32Buffer(floats))
+    }
+}
+
+impl AsRef<[u8]> for F32Buffer {
+    fn as_ref(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.0)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,7 +15,7 @@ mod view;
 mod weight;
 
 #[cfg(test)]
-pub(crate) mod test_support;
+pub(crate) mod test;
 
 pub use activation::{gelu, softmax, softmax_causal};
 pub use dtype::DType;

@@ -4,7 +4,7 @@
 
 use crate::gguf::Value;
 use crate::gguf::test::fixtures::FixtureBuilder;
-use crate::tensor::test_support::Rng;
+use crate::tensor::test::Rng;
 
 const F32_TYPE_ID: u32 = 0;
 

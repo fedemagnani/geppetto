@@ -95,7 +95,7 @@ pub fn matmul_nn_causal(a: TensorView, b: TensorView, mut out: TensorViewMut, n_
 
 #[cfg(test)]
 mod tests {
-    use crate::tensor::test_support::{Rng, assert_close, naive_matmul};
+    use crate::tensor::test::{Rng, assert_close, naive_matmul};
     use crate::tensor::{Shape, TensorView, TensorViewMut, matmul, matmul_nn, matmul_nn_causal};
 
     /// `a [m, k] @ b^T [n, k]` through the driver, into a fresh buffer.

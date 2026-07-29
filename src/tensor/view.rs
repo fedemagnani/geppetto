@@ -33,12 +33,9 @@ fn check(len: usize, shape: Shape, row_stride: usize) {
         row_stride >= shape.cols(),
         "view: row_stride {row_stride} shorter than a row of {shape}"
     );
-    let expected = match shape.rows() {
-        0 => 0,
-        rows => (rows - 1) * row_stride + shape.cols(),
-    };
     assert_eq!(
-        len, expected,
+        len,
+        shape.strided_len(row_stride),
         "view: data length {len} does not fit {shape} with row_stride {row_stride}"
     );
 }
@@ -189,12 +186,6 @@ mod tests {
             0.0, 0.0, 2.0, 2.0, 0.0, 0.0,
         ];
         assert_eq!(data, expected);
-    }
-
-    #[test]
-    fn empty_shape_takes_empty_data() {
-        let v = TensorView::contiguous(&[], Shape::new(0, 5));
-        assert_eq!(v.rows(), 0);
     }
 
     #[test]
