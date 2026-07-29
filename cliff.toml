@@ -61,4 +61,4 @@ sort_commits = "oldest"
 
 [remote.github]
 owner = "fedemagnani"
-repo = "harness-eng-skills"
+repo = "geppetto"
