@@ -16,8 +16,11 @@ pub struct Gpt2State {
 }
 
 impl Gpt2State {
-    pub fn new(hp: HParams, n_vocab: usize) -> Gpt2State {
-        let layout = Gpt2Layout::new(&hp, n_vocab);
+    /// `kernel_scratch` is the worst-case float count the model's matmul
+    /// kernel needs per call, already maxed over its call shapes -- a plain
+    /// size, so state and layout stay kernel-agnostic.
+    pub fn new(hp: HParams, n_vocab: usize, kernel_scratch: usize) -> Gpt2State {
+        let layout = Gpt2Layout::new(&hp, n_vocab, kernel_scratch);
         let arena = Arena::new(layout.total());
         Gpt2State {
             hp,

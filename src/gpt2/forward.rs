@@ -2,7 +2,7 @@ use crate::arena::poison;
 use crate::gpt2::attention::multi_head_attention;
 use crate::gpt2::{Gpt2Model, Gpt2State, ModelError};
 use crate::tensor::layer::{get_rows, norm};
-use crate::tensor::{Shape, TensorView, TensorViewMut, add, gelu, matmul};
+use crate::tensor::{MatmulKernel, Shape, TensorView, TensorViewMut, add, gelu};
 
 /// Mounts the `[rows, cols]` active prefix of a scratch region; never the
 /// whole worst-case carve.
@@ -14,7 +14,7 @@ fn prefix_mut(region: &mut [f32], rows: usize, cols: usize) -> TensorViewMut<'_>
     TensorViewMut::contiguous(&mut region[..rows * cols], Shape::new(rows, cols))
 }
 
-impl Gpt2Model {
+impl<K: MatmulKernel> Gpt2Model<K> {
     /// Runs `tokens` through the network on top of the state's `n_past`
     /// positions, appending their keys and values, and returns the last
     /// position's logits (`n_vocab` floats) -- earlier positions predict
@@ -94,10 +94,11 @@ impl Gpt2Model {
             // Q,K,V computation
             poison(views.qkv);
             let mut qkv = prefix_mut(views.qkv, n_new, qkv_width);
-            matmul(
+            self.matmul_kernel.matmul(
                 prefix(views.norm_out, n_new, n_embd),
-                layer.attn_qkv_w.view(),
+                &layer.attn_qkv_w,
                 qkv.reborrow(),
+                views.matmul_kernel_scratch,
             );
             add(qkv, layer.attn_qkv_b.view());
 
@@ -123,10 +124,11 @@ impl Gpt2Model {
 
             poison(views.proj_out);
             let mut proj = prefix_mut(views.proj_out, n_new, n_embd);
-            matmul(
+            self.matmul_kernel.matmul(
                 prefix(views.attn_out, n_new, n_embd),
-                layer.attn_out_w.view(),
+                &layer.attn_out_w,
                 proj.reborrow(),
+                views.matmul_kernel_scratch,
             );
             add(proj, layer.attn_out_b.view());
 
@@ -150,20 +152,22 @@ impl Gpt2Model {
 
             poison(views.ffn_up);
             let mut up = prefix_mut(views.ffn_up, n_new, hp.n_ff);
-            matmul(
+            self.matmul_kernel.matmul(
                 prefix(views.norm_out, n_new, n_embd),
-                layer.ffn_up_w.view(),
+                &layer.ffn_up_w,
                 up.reborrow(),
+                views.matmul_kernel_scratch,
             );
             add(up.reborrow(), layer.ffn_up_b.view());
             gelu(up);
 
             poison(views.proj_out);
             let mut down = prefix_mut(views.proj_out, n_new, n_embd);
-            matmul(
+            self.matmul_kernel.matmul(
                 prefix(views.ffn_up, n_new, hp.n_ff),
-                layer.ffn_down_w.view(),
+                &layer.ffn_down_w,
                 down.reborrow(),
+                views.matmul_kernel_scratch,
             );
             add(down, layer.ffn_down_b.view());
 
@@ -189,10 +193,11 @@ impl Gpt2Model {
 
         /////////////////////////////
         // Unembedding into the logits region
-        matmul(
+        self.matmul_kernel.matmul(
             prefix(views.norm_out, 1, n_embd),
-            w.output.view(),
+            &w.output,
             prefix_mut(views.logits, 1, n_vocab),
+            views.matmul_kernel_scratch,
         );
 
         let logits: &'s [f32] = views.logits;

@@ -6,4 +6,4 @@ mod add;
 mod mul;
 
 pub use add::add;
-pub use mul::{matmul, matmul_nn, matmul_nn_causal};
+pub use mul::{MatmulKernel, NaiveMatMul, matmul, matmul_nn, matmul_nn_causal};
