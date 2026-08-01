@@ -1,61 +1,5 @@
-use crate::tensor::test::{Rng, assert_close, naive_matmul};
-use crate::tensor::{Shape, TensorView, TensorViewMut, matmul_nn, matmul_nn_causal, matmul_nt};
-
-/// `a [m, k] @ b^T [n, k]` through the driver, into a fresh buffer.
-fn matmul_vec(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; m * n];
-    matmul_nt(
-        TensorView::contiguous(a, Shape::new(m, k)),
-        TensorView::contiguous(b, Shape::new(n, k)),
-        TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
-    );
-    out
-}
-
-#[test]
-fn hand_computed_pins_the_convention() {
-    // input: 2 tokens x 3 features
-    let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    // weight: 2 outputs, each 3 input weights
-    let weight = [1.0, 0.0, -1.0, 1.0, 1.0, 1.0];
-    // out[t, o] = dot(input[t], weight[o])
-    assert_eq!(
-        matmul_vec(&input, &weight, 2, 3, 2),
-        &[-2.0, 6.0, -2.0, 15.0]
-    );
-}
-
-#[test]
-fn agrees_with_naive_reference_on_random_shapes() {
-    let mut rng = Rng::new(0xA11CE);
-    for &(m, k, n) in &[(1, 1, 1), (3, 4, 2), (5, 5, 5), (2, 7, 3), (8, 1, 4)] {
-        let input = rng.vec(m * k, 3.0);
-        let weight = rng.vec(n * k, 3.0);
-        let got = matmul_vec(&input, &weight, m, k, n);
-        assert_close(&got, &naive_matmul(&input, &weight, m, k, n), 1e-4);
-    }
-}
-
-#[test]
-fn strided_operand_matches_a_copied_column_block() {
-    // a [2, 6] fused activation; its width-2 block at column 2 used as
-    // the matmul_nt input, once via a strided view, once via a copy
-    let mut rng = Rng::new(0xFACE);
-    let fused = rng.vec(2 * 6, 2.0);
-    let weight = rng.vec(3 * 2, 2.0);
-
-    let copied: Vec<f32> = fused.chunks(6).flat_map(|row| row[2..4].to_vec()).collect();
-    let expected = matmul_vec(&copied, &weight, 2, 2, 3);
-
-    let a = TensorView::strided(&fused[2..10], Shape::new(2, 2), 6);
-    let mut out = vec![0.0f32; 2 * 3];
-    matmul_nt(
-        a,
-        TensorView::contiguous(&weight, Shape::new(3, 2)),
-        TensorViewMut::contiguous(&mut out, Shape::new(2, 3)),
-    );
-    assert_close(&out, &expected, 1e-6);
-}
+use crate::tensor::test::{Rng, assert_close, matmul_vec};
+use crate::tensor::{Shape, TensorView, TensorViewMut, matmul_nn, matmul_nn_causal};
 
 #[test]
 fn matmul_nn_hand_computed() {
@@ -132,17 +76,4 @@ fn causal_bound_overwrites_stale_output() {
         0,
     );
     assert_eq!(out, &[3.0, 6.0]);
-}
-
-#[test]
-#[should_panic(expected = "contracted dim mismatch")]
-fn mismatched_inner_dim_panics() {
-    let input = [1.0, 2.0, 3.0];
-    let weight = [1.0, 2.0];
-    let mut out = vec![0.0f32; 1];
-    matmul_nt(
-        TensorView::contiguous(&input, Shape::new(1, 3)),
-        TensorView::contiguous(&weight, Shape::new(1, 2)),
-        TensorViewMut::contiguous(&mut out, Shape::new(1, 1)),
-    );
 }

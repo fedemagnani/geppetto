@@ -7,20 +7,24 @@
 //! environment block that makes a number reproducible.
 
 pub mod alloc;
+mod calibrate;
 mod env;
 mod report;
 mod runner;
 mod scenario;
 mod stats;
+mod timed;
 
 #[cfg(test)]
 mod test;
 
+pub use calibrate::SampleBudget;
 pub use env::{Environment, peak_rss_bytes};
 pub use report::Report;
 pub use runner::{BenchError, Harness, Measurement, ScenarioResult};
 pub use scenario::Scenario;
 pub use stats::Samples;
+pub use timed::TimedCall;
 
 /// Text the harness prompts with. Real English so the tokenizer does
 /// representative work; prompts longer than this are built by repeating it,

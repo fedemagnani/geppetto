@@ -19,6 +19,13 @@ thiserror = "2"
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath-alloc"]
 hotpath-cpu = ["hotpath/hotpath-cpu"]
+# Exposes the deterministic test helpers (`tensor::test`) to bench targets.
+test-utils = []
+
+[[bench]]
+name = "matmul_nt"
+harness = false
+required-features = ["test-utils"]
 
 [[bin]]
 name = "gguf-inspect"

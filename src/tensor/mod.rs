@@ -14,13 +14,17 @@ mod shape;
 mod view;
 mod weight;
 
-#[cfg(test)]
-pub(crate) mod test;
+// unit tests see this unconditionally; bench targets are separate crates,
+// so they reach it through the `test-utils` feature and the public path
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test;
 
 pub use activation::{gelu, softmax, softmax_causal};
 pub use dtype::DType;
 pub use error::TensorError;
-pub use ops::{MatmulNtKernel, NaiveMatMulNt, add, matmul_nn, matmul_nn_causal, matmul_nt};
+pub use ops::{
+    AutoVecMatMulNt, MatmulNtKernel, NaiveMatMulNt, add, matmul_nn, matmul_nn_causal, matmul_nt,
+};
 pub use shape::Shape;
 pub use view::{TensorView, TensorViewMut};
 pub use weight::WeightTensor;

@@ -1,7 +1,24 @@
-use crate::tensor::{Shape, TensorView, TensorViewMut};
+use crate::tensor::{MatmulNtKernel, Shape, TensorView, TensorViewMut, WeightTensor};
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+/// The baseline kernel: raw weights, no scratch, the triple loop of
+/// [`matmul_nt`]. Every research kernel benchmarks against this.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NaiveMatMulNt;
+
+impl MatmulNtKernel for NaiveMatMulNt {
+    type Weights = WeightTensor;
+
+    fn pack(&self, b: WeightTensor) -> WeightTensor {
+        b
+    }
+
+    fn scratch_len(&self, _m: usize, _k: usize, _n: usize) -> usize {
+        0
+    }
+
+    fn matmul_nt(&self, a: TensorView, b: &WeightTensor, out: TensorViewMut, _scratch: &mut [f32]) {
+        matmul_nt(a, b.view(), out);
+    }
 }
 
 /// Matrix multiply in the ggml/GGUF weight convention.
@@ -43,4 +60,8 @@ pub fn matmul_nt(a: TensorView, b: TensorView, mut out: TensorViewMut) {
             *slot = dot(a_row, b.row(j));
         }
     }
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }

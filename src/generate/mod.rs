@@ -16,13 +16,14 @@ pub use stream::Utf8Stream;
 
 use crate::gpt2::{Gpt2Model, Gpt2State};
 use crate::sampling::Sampler;
-use crate::tensor::{MatmulNtKernel, NaiveMatMulNt};
+use crate::tensor::{AutoVecMatMulNt, MatmulNtKernel};
 use crate::tokenizer::TokenId;
 
 /// Drives one sequence: owns its inference state and sampler, and forwards
 /// the prompt on the first step and a single token on each step after.
-/// Generic over the model's matmul kernel, defaulting to the baseline.
-pub struct Generator<'a, K: MatmulNtKernel = NaiveMatMulNt> {
+/// Generic over the model's matmul kernel, defaulting to the model's
+/// default.
+pub struct Generator<'a, K: MatmulNtKernel = AutoVecMatMulNt> {
     model: &'a Gpt2Model<K>,
     sampler: Sampler,
     state: Gpt2State,
