@@ -1,5 +1,7 @@
 use crate::arena::poison;
-use crate::tensor::{Shape, TensorView, TensorViewMut, matmul, matmul_nn_causal, softmax_causal};
+use crate::tensor::{
+    Shape, TensorView, TensorViewMut, matmul_nn_causal, matmul_nt, softmax_causal,
+};
 
 /// Multi-head causal self-attention for one layer, over arena regions --
 /// no allocation, no mask tensor, no per-head copies.
@@ -56,7 +58,7 @@ pub fn multi_head_attention(
         poison(scores);
         let scores_prefix = &mut scores[..n_new * n_kv];
         let scores_shape = Shape::new(n_new, n_kv);
-        matmul(
+        matmul_nt(
             q_h,
             k_h,
             TensorViewMut::contiguous(scores_prefix, scores_shape),

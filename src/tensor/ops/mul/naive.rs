@@ -1,11 +1,11 @@
-use crate::tensor::{MatmulKernel, TensorView, TensorViewMut, WeightTensor, matmul};
+use crate::tensor::{MatmulNtKernel, TensorView, TensorViewMut, WeightTensor, matmul_nt};
 
 /// The baseline kernel: raw weights, no scratch, the triple loop of
-/// [`matmul`]. Every research kernel benchmarks against this.
+/// [`matmul_nt`]. Every research kernel benchmarks against this.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct NaiveMatMul;
+pub struct NaiveMatMulNt;
 
-impl MatmulKernel for NaiveMatMul {
+impl MatmulNtKernel for NaiveMatMulNt {
     type Weights = WeightTensor;
 
     fn pack(&self, b: WeightTensor) -> WeightTensor {
@@ -16,7 +16,7 @@ impl MatmulKernel for NaiveMatMul {
         0
     }
 
-    fn matmul(&self, a: TensorView, b: &WeightTensor, out: TensorViewMut, _scratch: &mut [f32]) {
-        matmul(a, b.view(), out);
+    fn matmul_nt(&self, a: TensorView, b: &WeightTensor, out: TensorViewMut, _scratch: &mut [f32]) {
+        matmul_nt(a, b.view(), out);
     }
 }

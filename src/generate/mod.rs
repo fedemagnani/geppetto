@@ -16,13 +16,13 @@ pub use stream::Utf8Stream;
 
 use crate::gpt2::{Gpt2Model, Gpt2State};
 use crate::sampling::Sampler;
-use crate::tensor::{MatmulKernel, NaiveMatMul};
+use crate::tensor::{MatmulNtKernel, NaiveMatMulNt};
 use crate::tokenizer::TokenId;
 
 /// Drives one sequence: owns its inference state and sampler, and forwards
 /// the prompt on the first step and a single token on each step after.
 /// Generic over the model's matmul kernel, defaulting to the baseline.
-pub struct Generator<'a, K: MatmulKernel = NaiveMatMul> {
+pub struct Generator<'a, K: MatmulNtKernel = NaiveMatMulNt> {
     model: &'a Gpt2Model<K>,
     sampler: Sampler,
     state: Gpt2State,
@@ -34,7 +34,7 @@ pub struct Generator<'a, K: MatmulKernel = NaiveMatMul> {
     stop: Option<StopReason>,
 }
 
-impl<'a, K: MatmulKernel> Generator<'a, K> {
+impl<'a, K: MatmulNtKernel> Generator<'a, K> {
     /// Runs to completion, collecting every emitted token.
     pub fn generate_all(&mut self) -> Result<Vec<TokenId>, GenerateError> {
         let mut tokens = Vec::new();

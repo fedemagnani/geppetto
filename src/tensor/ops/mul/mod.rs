@@ -1,25 +1,25 @@
 //! Matrix multiplication: one free-function driver per file, the
-//! [`MatmulKernel`] seam here, and its [`Naive`] baseline in `naive`.
+//! [`MatmulNtKernel`] seam here, and its [`Naive`] baseline in `naive`.
 
 mod naive;
-// a `use mul::matmul` downstream resolves the name in both namespaces
+// a `use mul::matmul_nt` downstream resolves the name in both namespaces
 // (module and function), so these modules must be as visible as the
 // functions they re-export
-pub mod matmul;
 pub mod matmul_nn;
 pub mod matmul_nn_causal;
+pub mod matmul_nt;
 
 #[cfg(test)]
 mod tests;
 
-pub use matmul::matmul;
 pub use matmul_nn::matmul_nn;
 pub use matmul_nn_causal::matmul_nn_causal;
-pub use naive::NaiveMatMul;
+pub use matmul_nt::matmul_nt;
+pub use naive::NaiveMatMulNt;
 
 use crate::tensor::{TensorView, TensorViewMut, WeightTensor};
 
-/// A matmul implementation in the weight convention of [`matmul`]: `a` is
+/// A matmul_nt implementation in the weight convention of [`matmul_nt`]: `a` is
 /// `[m, k]` activations, `b` is a `[n, k]` weight (`n` output features, each
 /// a row of `k` input weights), and `out[i, j] = dot(a row i, b row j)`
 /// fully overwrites `out` as `[m, n]`.
@@ -38,8 +38,8 @@ use crate::tensor::{TensorView, TensorViewMut, WeightTensor};
 /// threaded kernel owns its pool internally and answers [`scratch_len`] for
 /// all of its threads at once, which is why the sizing methods take `&self`.
 ///
-/// [`scratch_len`]: MatmulKernel::scratch_len
-pub trait MatmulKernel {
+/// [`scratch_len`]: MatmulNtKernel::scratch_len
+pub trait MatmulNtKernel {
     /// The kernel's own at-rest format for a weight matrix: packed panels
     /// for a blocked GEMM, interleaved columns for a SIMD GEMV, quantized
     /// blocks later. Produced once per weight by [`pack`] at model load, so
@@ -47,7 +47,7 @@ pub trait MatmulKernel {
     /// storage should back it with an [`Arena`](crate::arena::Arena) to
     /// inherit the one-allocation, 64-byte-aligned regime.
     ///
-    /// [`pack`]: MatmulKernel::pack
+    /// [`pack`]: MatmulNtKernel::pack
     type Weights;
 
     /// Converts a raw `[n, k]` weight into this kernel's format. Runs once
@@ -57,10 +57,10 @@ pub trait MatmulKernel {
 
     /// Floats of scratch one `[m, k] @ [n, k]^T` call needs. Answered before
     /// generation starts: the model takes the worst case over its call
-    /// shapes and carves one arena region that big, which [`matmul`] then
+    /// shapes and carves one arena region that big, which [`matmul_nt`] then
     /// receives. Kernels needing no scratch return 0.
     ///
-    /// [`matmul`]: MatmulKernel::matmul
+    /// [`matmul_nt`]: MatmulNtKernel::matmul_nt
     fn scratch_len(&self, m: usize, k: usize, n: usize) -> usize;
 
     /// Computes `out = a @ b^T` with `b` already in the kernel's format.
@@ -68,6 +68,6 @@ pub trait MatmulKernel {
     /// (NaN-poisoned in debug builds) and garbage after return: write before
     /// reading, never allocate.
     ///
-    /// [`scratch_len`]: MatmulKernel::scratch_len
-    fn matmul(&self, a: TensorView, b: &Self::Weights, out: TensorViewMut, scratch: &mut [f32]);
+    /// [`scratch_len`]: MatmulNtKernel::scratch_len
+    fn matmul_nt(&self, a: TensorView, b: &Self::Weights, out: TensorViewMut, scratch: &mut [f32]);
 }

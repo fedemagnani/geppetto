@@ -1,14 +1,14 @@
 use crate::gguf::GgufFile;
 use crate::gpt2::{HParams, ModelError};
-use crate::tensor::{MatmulKernel, WeightTensor};
+use crate::tensor::{MatmulNtKernel, WeightTensor};
 
 /// The weights of one transformer block, with the four linear weights held in
-/// the kernel's packed format ([`MatmulKernel::Weights`], produced once at
+/// the kernel's packed format ([`MatmulNtKernel::Weights`], produced once at
 /// load). Raw linear weights are `[n_out, n_in]` (the ggml convention
-/// [`crate::tensor::matmul`] expects); norm weights and biases stay
+/// [`crate::tensor::matmul_nt`] expects); norm weights and biases stay
 /// [`WeightTensor`] single rows. F32 tensors borrow the file mapping, F16
 /// ones are widened at load -- see [`WeightTensor`].
-pub struct Gpt2TransformerWeights<K: MatmulKernel> {
+pub struct Gpt2TransformerWeights<K: MatmulNtKernel> {
     pub attn_norm_w: WeightTensor,
     pub attn_norm_b: WeightTensor,
     pub attn_qkv_w: K::Weights,
@@ -28,8 +28,8 @@ pub struct Gpt2TransformerWeights<K: MatmulKernel> {
 /// clone shares storage rather than copying -- though a kernel whose pack is
 /// not the identity then holds its own packed copy). `token_embd` stays raw:
 /// the embedding lookup reads its rows directly, only the five matmul
-/// weights go through [`MatmulKernel::pack`].
-pub struct Gpt2Weights<K: MatmulKernel> {
+/// weights go through [`MatmulNtKernel::pack`].
+pub struct Gpt2Weights<K: MatmulNtKernel> {
     /// A matrix [vocabulary_size, embedding_dimension]: each row represents a vector embedding
     /// associated with a specific token.
     pub token_embd: WeightTensor,
@@ -46,7 +46,7 @@ pub struct Gpt2Weights<K: MatmulKernel> {
     pub layers: Vec<Gpt2TransformerWeights<K>>,
 }
 
-impl<K: MatmulKernel> Gpt2Weights<K> {
+impl<K: MatmulNtKernel> Gpt2Weights<K> {
     #[hotpath::measure]
     pub fn from_gguf(
         file: &GgufFile,

@@ -20,19 +20,19 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// [`matmul_nn`]: crate::tensor::matmul_nn
 #[hotpath::measure]
-pub fn matmul(a: TensorView, b: TensorView, mut out: TensorViewMut) {
+pub fn matmul_nt(a: TensorView, b: TensorView, mut out: TensorViewMut) {
     let (m, k, n) = (a.rows(), a.cols(), b.rows());
     assert_eq!(
         k,
         b.cols(),
-        "matmul: contracted dim mismatch, {} vs {}",
+        "matmul_nt: contracted dim mismatch, {} vs {}",
         a.shape(),
         b.shape(),
     );
     assert_eq!(
         out.shape(),
         Shape::new(m, n),
-        "matmul: out must be [{m}, {n}], got {}",
+        "matmul_nt: out must be [{m}, {n}], got {}",
         out.shape(),
     );
 

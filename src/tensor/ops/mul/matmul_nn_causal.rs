@@ -6,12 +6,7 @@ use crate::tensor::{Shape, TensorView, TensorViewMut};
 /// beyond the bound are never read, so they may hold garbage (or NaN
 /// poison).
 ///
-/// Runs as a row-axpy over `b`'s contiguous rows. Fully overwrites `out`:
-/// each output row is zero-initialized before accumulating, so the `+=` is
-/// internal and never observable by callers.
-///
-/// [`matmul_nn`]: crate::tensor::matmul_nn
-/// [`softmax_causal`]: crate::tensor::softmax_causal
+/// It implements that `ikj` matrix multiplication
 #[hotpath::measure]
 pub fn matmul_nn_causal(a: TensorView, b: TensorView, mut out: TensorViewMut, n_past: usize) {
     let (m, k, n) = (a.rows(), a.cols(), b.cols());

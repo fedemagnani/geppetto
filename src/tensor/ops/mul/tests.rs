@@ -1,10 +1,10 @@
 use crate::tensor::test::{Rng, assert_close, naive_matmul};
-use crate::tensor::{Shape, TensorView, TensorViewMut, matmul, matmul_nn, matmul_nn_causal};
+use crate::tensor::{Shape, TensorView, TensorViewMut, matmul_nn, matmul_nn_causal, matmul_nt};
 
 /// `a [m, k] @ b^T [n, k]` through the driver, into a fresh buffer.
 fn matmul_vec(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; m * n];
-    matmul(
+    matmul_nt(
         TensorView::contiguous(a, Shape::new(m, k)),
         TensorView::contiguous(b, Shape::new(n, k)),
         TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
@@ -39,7 +39,7 @@ fn agrees_with_naive_reference_on_random_shapes() {
 #[test]
 fn strided_operand_matches_a_copied_column_block() {
     // a [2, 6] fused activation; its width-2 block at column 2 used as
-    // the matmul input, once via a strided view, once via a copy
+    // the matmul_nt input, once via a strided view, once via a copy
     let mut rng = Rng::new(0xFACE);
     let fused = rng.vec(2 * 6, 2.0);
     let weight = rng.vec(3 * 2, 2.0);
@@ -49,7 +49,7 @@ fn strided_operand_matches_a_copied_column_block() {
 
     let a = TensorView::strided(&fused[2..10], Shape::new(2, 2), 6);
     let mut out = vec![0.0f32; 2 * 3];
-    matmul(
+    matmul_nt(
         a,
         TensorView::contiguous(&weight, Shape::new(3, 2)),
         TensorViewMut::contiguous(&mut out, Shape::new(2, 3)),
@@ -140,7 +140,7 @@ fn mismatched_inner_dim_panics() {
     let input = [1.0, 2.0, 3.0];
     let weight = [1.0, 2.0];
     let mut out = vec![0.0f32; 1];
-    matmul(
+    matmul_nt(
         TensorView::contiguous(&input, Shape::new(1, 3)),
         TensorView::contiguous(&weight, Shape::new(1, 2)),
         TensorViewMut::contiguous(&mut out, Shape::new(1, 1)),

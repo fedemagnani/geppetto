@@ -20,7 +20,7 @@ pub(crate) mod test;
 pub use activation::{gelu, softmax, softmax_causal};
 pub use dtype::DType;
 pub use error::TensorError;
-pub use ops::{MatmulKernel, NaiveMatMul, add, matmul, matmul_nn, matmul_nn_causal};
+pub use ops::{MatmulNtKernel, NaiveMatMulNt, add, matmul_nn, matmul_nn_causal, matmul_nt};
 pub use shape::Shape;
 pub use view::{TensorView, TensorViewMut};
 pub use weight::WeightTensor;

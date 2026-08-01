@@ -22,13 +22,13 @@ pub use state::Gpt2State;
 pub use weights::{Gpt2TransformerWeights, Gpt2Weights};
 
 use crate::gguf::GgufFile;
-use crate::tensor::{MatmulKernel, NaiveMatMul};
+use crate::tensor::{MatmulNtKernel, NaiveMatMulNt};
 
 /// The model, generic over the matmul kernel its five weight matmuls run
 /// through (the Q@K^T score matmul in attention stays on the raw
-/// [`matmul`](crate::tensor::matmul)). Weights are packed into the kernel's
+/// [`matmul_nt`](crate::tensor::matmul_nt)). Weights are packed into the kernel's
 /// format once at load; swapping kernels is a type parameter, not a rewire.
-pub struct Gpt2Model<K: MatmulKernel = NaiveMatMul> {
+pub struct Gpt2Model<K: MatmulNtKernel = NaiveMatMulNt> {
     /// Hyperparameters
     hparams: HParams,
     /// Model weights, linear ones in the kernel's packed format
@@ -37,14 +37,14 @@ pub struct Gpt2Model<K: MatmulKernel = NaiveMatMul> {
     matmul_kernel: K,
 }
 
-impl Gpt2Model<NaiveMatMul> {
+impl Gpt2Model<NaiveMatMulNt> {
     /// Loads with the baseline [`Naive`] kernel.
     pub fn from_gguf(file: &GgufFile) -> Result<Gpt2Model, ModelError> {
-        Gpt2Model::with_kernel(file, NaiveMatMul)
+        Gpt2Model::with_kernel(file, NaiveMatMulNt)
     }
 }
 
-impl<K: MatmulKernel> Gpt2Model<K> {
+impl<K: MatmulNtKernel> Gpt2Model<K> {
     /// Loads the model and packs its linear weights through `kernel`.
     pub fn with_kernel(file: &GgufFile, kernel: K) -> Result<Gpt2Model<K>, ModelError> {
         let hparams = HParams::from_gguf(file)?;
@@ -75,7 +75,7 @@ impl<K: MatmulKernel> Gpt2Model<K> {
     }
 
     /// Worst-case kernel scratch for one forward pass: the max of
-    /// [`MatmulKernel::scratch_len`] over the five weight-matmul shapes at
+    /// [`MatmulNtKernel::scratch_len`] over the five weight-matmul shapes at
     /// `m = n_ctx` (a full-context prefill). A plain float count, so the
     /// layout stays kernel-agnostic.
     fn kernel_scratch_len(&self) -> usize {
