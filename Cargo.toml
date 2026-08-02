@@ -27,6 +27,11 @@ name = "matmul_nt"
 harness = false
 required-features = ["test-utils"]
 
+[[bench]]
+name = "dot"
+harness = false
+required-features = ["test-utils"]
+
 [[bin]]
 name = "gguf-inspect"
 path = "src/bin/gguf_inspect.rs"

@@ -14,4 +14,7 @@ mod tests;
 
 pub use matmul_nn::matmul_nn;
 pub use matmul_nn_causal::matmul_nn_causal;
-pub use matmul_nt::{AutoVecMatMulNt, FmaMatMulNt, MatmulNtKernel, NaiveMatMulNt, matmul_nt};
+pub use matmul_nt::{
+    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotProduct, Fma, FmaDot, FmaMatMulNt,
+    MatmulNtKernel, NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nt,
+};

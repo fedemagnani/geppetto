@@ -8,8 +8,8 @@ mod dot;
 mod tests;
 
 pub use dot::{
-    AutoVecDotProduct, AutoVecMatMulNt, DotMatMulNt, DotProduct, Fma, FmaMatMulNt, MulAdd,
-    NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nt,
+    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotMatMulNt, DotProduct, Fma, FmaDot,
+    FmaMatMulNt, MulAdd, NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nt,
 };
 
 use crate::tensor::{TensorView, TensorViewMut, WeightTensor};

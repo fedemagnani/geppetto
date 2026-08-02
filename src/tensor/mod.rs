@@ -23,7 +23,8 @@ pub use activation::{gelu, softmax, softmax_causal};
 pub use dtype::DType;
 pub use error::TensorError;
 pub use ops::{
-    AutoVecMatMulNt, FmaMatMulNt, MatmulNtKernel, NaiveMatMulNt, add, matmul_nn, matmul_nn_causal,
+    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotProduct, Fma, FmaDot, FmaMatMulNt,
+    MatmulNtKernel, NaiveDotProduct, NaiveMatMulNt, Unfused, add, matmul_nn, matmul_nn_causal,
     matmul_nt,
 };
 pub use shape::Shape;

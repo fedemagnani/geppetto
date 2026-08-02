@@ -7,6 +7,7 @@ mod mul;
 
 pub use add::add;
 pub use mul::{
-    AutoVecMatMulNt, FmaMatMulNt, MatmulNtKernel, NaiveMatMulNt, matmul_nn, matmul_nn_causal,
+    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotProduct, Fma, FmaDot, FmaMatMulNt,
+    MatmulNtKernel, NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nn, matmul_nn_causal,
     matmul_nt,
 };

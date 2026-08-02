@@ -11,15 +11,17 @@
 //! medians are the headline and a relative spread above a few percent means
 //! the machine was not quiet.
 
-mod report;
+#[path = "../common/mod.rs"]
+mod common;
 mod workload;
 
 use std::time::Duration;
 
 use geppetto::bench::SampleBudget;
-use geppetto::tensor::{AutoVecMatMulNt, FmaMatMulNt, NaiveMatMulNt, Shape};
+use geppetto::tensor::{AutoVecMatMulNt, FmaMatMulNt, MatmulNtKernel, NaiveMatMulNt, Shape};
 
-use crate::report::Collector;
+use crate::common::{Collector, progress_bar, short_type_name};
+use crate::workload::Sampler;
 
 /// The matmul shapes one GPT-2 large layer stack issues, as logical
 /// `a [m, k] @ b [k, n]` pairs (the weight is stored transposed `[n, k]`
@@ -41,14 +43,33 @@ fn main() {
     // keep the whole run in tens of seconds
     let budget = SampleBudget::new(Duration::from_millis(250), 5, 200);
     let mut collector = Collector::new(budget);
-    collector.run_bench::<NaiveMatMulNt>(&SHAPES);
-    collector.run_bench::<AutoVecMatMulNt<8>>(&SHAPES);
-    collector.run_bench::<AutoVecMatMulNt<16>>(&SHAPES);
-    collector.run_bench::<AutoVecMatMulNt<32>>(&SHAPES);
-    collector.run_bench::<AutoVecMatMulNt<64>>(&SHAPES);
-    collector.run_bench::<FmaMatMulNt<8>>(&SHAPES);
-    collector.run_bench::<FmaMatMulNt<16>>(&SHAPES);
-    collector.run_bench::<FmaMatMulNt<32>>(&SHAPES);
-    collector.run_bench::<FmaMatMulNt<64>>(&SHAPES);
+    run_bench::<NaiveMatMulNt>(&mut collector, &SHAPES);
+    run_bench::<AutoVecMatMulNt<8>>(&mut collector, &SHAPES);
+    run_bench::<AutoVecMatMulNt<16>>(&mut collector, &SHAPES);
+    run_bench::<AutoVecMatMulNt<32>>(&mut collector, &SHAPES);
+    run_bench::<AutoVecMatMulNt<64>>(&mut collector, &SHAPES);
+    run_bench::<FmaMatMulNt<8>>(&mut collector, &SHAPES);
+    run_bench::<FmaMatMulNt<16>>(&mut collector, &SHAPES);
+    run_bench::<FmaMatMulNt<32>>(&mut collector, &SHAPES);
+    run_bench::<FmaMatMulNt<64>>(&mut collector, &SHAPES);
     collector.display();
+}
+
+/// Benchmarks `K` over every shape pair, labelled with the last segment of
+/// the type's path. Cells are built one at a time inside the loop -- the
+/// vocab-sized weights are too large to hold all at once.
+fn run_bench<K: MatmulNtKernel + Default>(collector: &mut Collector, shapes: &[(Shape, Shape)]) {
+    let kernel = K::default();
+    let name = short_type_name(std::any::type_name::<K>());
+    let bar = progress_bar(&name, shapes.len());
+    for &(a, b) in shapes {
+        let label = format!("{a} @ {b}");
+        bar.set_message(label.clone());
+        let sampler = Sampler::new(&kernel, a, b);
+        let samples = sampler.compute_samples(collector.budget());
+        let flops = (2 * a.rows() * a.cols() * b.cols()) as f64;
+        collector.record(&name, label, flops, &samples);
+        bar.inc(1);
+    }
+    bar.finish_and_clear();
 }

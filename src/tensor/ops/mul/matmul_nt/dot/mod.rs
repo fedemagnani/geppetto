@@ -12,7 +12,9 @@
 mod autovec;
 mod naive;
 
-pub use autovec::{AutoVecDotProduct, AutoVecMatMulNt, Fma, FmaMatMulNt, MulAdd, Unfused};
+pub use autovec::{
+    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, Fma, FmaDot, FmaMatMulNt, MulAdd, Unfused,
+};
 pub use naive::{NaiveDotProduct, NaiveMatMulNt, matmul_nt};
 
 use std::marker::PhantomData;

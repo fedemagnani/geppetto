@@ -59,13 +59,17 @@ pub struct AutoVecDotProduct<A, const LANES: usize = DEFAULT_LANES> {
     _strategy: PhantomData<A>,
 }
 
+/// The chunked dot with plain mul-then-add lanes.
+pub type AutoVecDot<const LANES: usize = DEFAULT_LANES> = AutoVecDotProduct<Unfused, LANES>;
+
+/// The chunked dot with explicitly fused lanes.
+pub type FmaDot<const LANES: usize = DEFAULT_LANES> = AutoVecDotProduct<Fma, LANES>;
+
 /// The chunked kernel with plain mul-then-add lanes.
-pub type AutoVecMatMulNt<const LANES: usize = DEFAULT_LANES> =
-    DotMatMulNt<AutoVecDotProduct<Unfused, LANES>>;
+pub type AutoVecMatMulNt<const LANES: usize = DEFAULT_LANES> = DotMatMulNt<AutoVecDot<LANES>>;
 
 /// The chunked kernel with explicitly fused lanes.
-pub type FmaMatMulNt<const LANES: usize = DEFAULT_LANES> =
-    DotMatMulNt<AutoVecDotProduct<Fma, LANES>>;
+pub type FmaMatMulNt<const LANES: usize = DEFAULT_LANES> = DotMatMulNt<FmaDot<LANES>>;
 
 impl<A: MulAdd, const LANES: usize> DotProduct for AutoVecDotProduct<A, LANES> {
     #[inline(always)]
