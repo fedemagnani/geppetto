@@ -1,15 +1,16 @@
-//! The `a @ b^T` weight matmul: the [`MatmulNtKernel`] seam here, the
-//! [`matmul_nt`] driver and [`NaiveMatMulNt`] baseline in `naive`, and one
-//! research kernel per file (`autovec`).
+//! The `a @ b^T` weight matmul: the [`MatmulNtKernel`] seam here, and the
+//! dot-product kernel family -- [`matmul_nt`] driver, [`NaiveMatMulNt`]
+//! baseline, chunked research kernels -- in `dot`.
 
-mod autovec;
-mod naive;
+mod dot;
 
 #[cfg(test)]
 mod tests;
 
-pub use autovec::{AutoVecMatMulNt, FmaMatMulNt};
-pub use naive::{NaiveMatMulNt, matmul_nt};
+pub use dot::{
+    AutoVecDotProduct, AutoVecMatMulNt, DotMatMulNt, DotProduct, Fma, FmaMatMulNt, MulAdd,
+    NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nt,
+};
 
 use crate::tensor::{TensorView, TensorViewMut, WeightTensor};
 

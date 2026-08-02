@@ -40,7 +40,7 @@ pub struct Gpt2Model<K: MatmulNtKernel = AutoVecMatMulNt> {
 impl Gpt2Model {
     /// Loads with the default [`AutoVecMatMulNt`] kernel.
     pub fn from_gguf(file: &GgufFile) -> Result<Gpt2Model, ModelError> {
-        Gpt2Model::with_kernel(file, AutoVecMatMulNt)
+        Gpt2Model::with_kernel(file, AutoVecMatMulNt::default())
     }
 }
 

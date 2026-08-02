@@ -96,21 +96,22 @@ fn assert_kernel_agrees_with_naive(kernel: &impl MatmulNtKernel<Weights = Weight
 
 #[test]
 fn unrolled_kernel_agrees_with_naive_on_random_shapes() {
-    // the bare name in value position doesn't apply the LANES default;
-    // the type annotation does
-    let kernel: AutoVecMatMulNt = AutoVecMatMulNt;
+    // a type alias is not a value constructor, and the bare underlying
+    // name would not apply the LANES default; the annotated default() does
+    // both
+    let kernel: AutoVecMatMulNt = AutoVecMatMulNt::default();
     assert_kernel_agrees_with_naive(&kernel);
 }
 
 #[test]
 fn fma_kernel_agrees_with_naive_on_random_shapes() {
-    let kernel: FmaMatMulNt = FmaMatMulNt;
+    let kernel: FmaMatMulNt = FmaMatMulNt::default();
     assert_kernel_agrees_with_naive(&kernel);
 }
 
 #[test]
 fn unrolled_pack_is_the_identity() {
-    let kernel: AutoVecMatMulNt = AutoVecMatMulNt;
+    let kernel: AutoVecMatMulNt = AutoVecMatMulNt::default();
     let values: Vec<f32> = (0..8).map(|x| x as f32).collect();
     let raw = weight_tensor(&values, 2, 4);
     let raw_ptr = raw.data().as_ptr();

@@ -31,13 +31,13 @@ impl Collector {
     /// statistics absorb without a trace.
     pub fn run_bench<K: MatmulNtKernel + Default>(&mut self, shapes: &[(Shape, Shape)]) {
         let kernel = K::default();
-        let full_name = std::any::type_name::<K>();
-        let name = full_name.rsplit("::").next().unwrap_or(full_name);
-        let bar = progress_bar(name, shapes.len());
+        let name = short_type_name(std::any::type_name::<K>());
+        let bar = progress_bar(&name, shapes.len());
         for &(a, b) in shapes {
             bar.set_message(format!("{a} @ {b}"));
             let samples = Sampler::new(&kernel, a, b).compute_samples(self.budget);
-            self.rows.push(SummaryStats::new(name, a, b, &samples));
+            self.rows
+                .push(SummaryStats::new(name.clone(), a, b, &samples));
             bar.inc(1);
         }
         bar.finish_and_clear();
@@ -45,12 +45,12 @@ impl Collector {
 
     pub fn display(&self) {
         println!(
-            "{:<20} {:>12} {:>14} {:>12} {:>12} {:>8} {:>9}",
+            "{:<43} {:>12} {:>14} {:>12} {:>12} {:>8} {:>9}",
             "kernel", "a", "b", "p50", "p95", "spread", "GFLOP/s"
         );
         for row in &self.rows {
             println!(
-                "{:<20} {:>12} {:>14} {:>12} {:>12} {:>7.1}% {:>9.2}",
+                "{:<43} {:>12} {:>14} {:>12} {:>12} {:>7.1}% {:>9.2}",
                 row.kernel,
                 row.a.to_string(),
                 row.b.to_string(),
@@ -63,16 +63,37 @@ impl Collector {
     }
 }
 
+/// Drops every module path from a `type_name`, including inside generic
+/// arguments: `a::b::AutoVecDotProduct<a::b::Unfused, 8>` becomes
+/// `AutoVecDotProduct<Unfused, 8>` -- what the source spells.
+fn short_type_name(full: &str) -> String {
+    let mut out = String::new();
+    let mut segment = String::new();
+    for c in full.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            segment.push(c);
+        } else if c == ':' {
+            segment.clear();
+        } else {
+            out.push_str(&segment);
+            segment.clear();
+            out.push(c);
+        }
+    }
+    out.push_str(&segment);
+    out
+}
+
 /// A per-kernel bar: spinner, kernel name as bold prefix, elapsed time,
 /// the in-flight shape pair as the dimmed message, one tick per cell.
-fn progress_bar(kernel: &'static str, cells: usize) -> ProgressBar {
-    let template = "{spinner:.green} {prefix:20.bold.cyan} [{bar:30.cyan/blue}] {pos}/{len} {elapsed} {msg:.dim}";
+fn progress_bar(kernel: &str, cells: usize) -> ProgressBar {
+    let template = "{spinner:.green} {prefix:43.bold.cyan} [{bar:30.cyan/blue}] {pos}/{len} {elapsed} {msg:.dim}";
     let style = ProgressStyle::with_template(template)
         .expect("static template is valid")
         .progress_chars("=> ");
     let bar = ProgressBar::new(cells as u64)
         .with_style(style)
-        .with_prefix(kernel);
+        .with_prefix(kernel.to_string());
     bar.enable_steady_tick(std::time::Duration::from_millis(200));
     bar
 }
@@ -80,7 +101,7 @@ fn progress_bar(kernel: &'static str, cells: usize) -> ProgressBar {
 /// One kernel x shape cell condensed from its [`Samples`], plus the
 /// identity of what was measured.
 struct SummaryStats {
-    kernel: &'static str,
+    kernel: String,
     a: Shape,
     b: Shape,
     p50: f64,
@@ -90,7 +111,7 @@ struct SummaryStats {
 }
 
 impl SummaryStats {
-    fn new(kernel: &'static str, a: Shape, b: Shape, samples: &Samples) -> SummaryStats {
+    fn new(kernel: String, a: Shape, b: Shape, samples: &Samples) -> SummaryStats {
         let p50 = samples.median();
         let flops = (2 * a.rows() * a.cols() * b.cols()) as f64;
         SummaryStats {
