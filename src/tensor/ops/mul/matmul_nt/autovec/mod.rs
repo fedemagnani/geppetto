@@ -1,5 +1,9 @@
 use crate::tensor::{MatmulNtKernel, Shape, TensorView, TensorViewMut, WeightTensor};
 
+mod fma;
+
+pub use fma::FmaMatMulNt;
+
 /// Bytes of one aarch64 NEON vector register: 128 bits wide.
 const BYTES_IN_VECTOR_REGISTER: usize = 128 / 8;
 

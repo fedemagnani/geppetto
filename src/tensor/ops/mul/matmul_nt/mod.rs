@@ -8,7 +8,7 @@ mod naive;
 #[cfg(test)]
 mod tests;
 
-pub use autovec::AutoVecMatMulNt;
+pub use autovec::{AutoVecMatMulNt, FmaMatMulNt};
 pub use naive::{NaiveMatMulNt, matmul_nt};
 
 use crate::tensor::{TensorView, TensorViewMut, WeightTensor};

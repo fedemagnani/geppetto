@@ -17,7 +17,7 @@ mod workload;
 use std::time::Duration;
 
 use geppetto::bench::SampleBudget;
-use geppetto::tensor::{AutoVecMatMulNt, NaiveMatMulNt, Shape};
+use geppetto::tensor::{AutoVecMatMulNt, FmaMatMulNt, NaiveMatMulNt, Shape};
 
 use crate::report::Collector;
 
@@ -46,5 +46,9 @@ fn main() {
     collector.run_bench::<AutoVecMatMulNt<16>>(&SHAPES);
     collector.run_bench::<AutoVecMatMulNt<32>>(&SHAPES);
     collector.run_bench::<AutoVecMatMulNt<64>>(&SHAPES);
+    collector.run_bench::<FmaMatMulNt<8>>(&SHAPES);
+    collector.run_bench::<FmaMatMulNt<16>>(&SHAPES);
+    collector.run_bench::<FmaMatMulNt<32>>(&SHAPES);
+    collector.run_bench::<FmaMatMulNt<64>>(&SHAPES);
     collector.display();
 }

@@ -2,8 +2,8 @@ use bytes::Bytes;
 
 use crate::tensor::test::{Rng, assert_close, matmul_vec, naive_matmul};
 use crate::tensor::{
-    AutoVecMatMulNt, DType, MatmulNtKernel, Shape, TensorView, TensorViewMut, WeightTensor,
-    matmul_nt,
+    AutoVecMatMulNt, DType, FmaMatMulNt, MatmulNtKernel, Shape, TensorView, TensorViewMut,
+    WeightTensor, matmul_nt,
 };
 
 #[test]
@@ -59,15 +59,12 @@ fn weight_tensor(values: &[f32], n: usize, k: usize) -> WeightTensor {
     WeightTensor::from_gguf_bytes(DType::F32, Shape::new(n, k), bytes).unwrap()
 }
 
-#[test]
-fn unrolled_kernel_agrees_with_naive_on_random_shapes() {
-    // the bare name in value position doesn't apply the LANES default;
-    // the type annotation does
-    let kernel: AutoVecMatMulNt = AutoVecMatMulNt;
+/// Agreement check every raw-weight research kernel goes through, over
+/// shapes straddling the LANES=16 boundary: tail-only k (1, 7, 15), exact
+/// multiples (16, 1280), mixed (17, 33); (1, 1280, 8) is a decode GEMV
+/// shape.
+fn assert_kernel_agrees_with_naive(kernel: &impl MatmulNtKernel<Weights = WeightTensor>) {
     let mut rng = Rng::new(0x5EED);
-    // k values straddle the LANES=16 boundary: tail-only (1, 7, 15), exact
-    // multiples (16, 1280), and mixed (17, 33); (1, 1280, 8) is a decode
-    // GEMV shape
     let shapes = [
         (1, 1, 1),
         (2, 7, 3),
@@ -90,11 +87,25 @@ fn unrolled_kernel_agrees_with_naive_on_random_shapes() {
             TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
             &mut [],
         );
-        // reassociated summation drifts from the serial reference by
-        // rounding; at k=1280 dots reach ~1e2, putting that drift above
-        // the 1e-4 the other tests use
+        // reassociated (and, for fma, fused) accumulation drifts from the
+        // serial reference by rounding; at k=1280 dots reach ~1e2, putting
+        // that drift above the 1e-4 the other tests use
         assert_close(&out, &naive_matmul(&input, &weight, m, k, n), 1e-3);
     }
+}
+
+#[test]
+fn unrolled_kernel_agrees_with_naive_on_random_shapes() {
+    // the bare name in value position doesn't apply the LANES default;
+    // the type annotation does
+    let kernel: AutoVecMatMulNt = AutoVecMatMulNt;
+    assert_kernel_agrees_with_naive(&kernel);
+}
+
+#[test]
+fn fma_kernel_agrees_with_naive_on_random_shapes() {
+    let kernel: FmaMatMulNt = FmaMatMulNt;
+    assert_kernel_agrees_with_naive(&kernel);
 }
 
 #[test]
