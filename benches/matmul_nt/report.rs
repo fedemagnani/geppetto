@@ -2,6 +2,7 @@
 
 use geppetto::bench::{SampleBudget, Samples};
 use geppetto::tensor::{MatmulNtKernel, Shape};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::workload::Sampler;
 
@@ -23,14 +24,23 @@ impl Collector {
 
     /// Benchmarks `K` over every shape pair, labelled with the last
     /// segment of the type's path.
+    ///
+    /// The progress bar (stderr, cleared on finish) advances only between
+    /// cells; the steady tick that animates the spinner redraws from its
+    /// own thread every 200ms, a ~microsecond stderr write the median/MAD
+    /// statistics absorb without a trace.
     pub fn run_bench<K: MatmulNtKernel + Default>(&mut self, shapes: &[(Shape, Shape)]) {
         let kernel = K::default();
         let full_name = std::any::type_name::<K>();
         let name = full_name.rsplit("::").next().unwrap_or(full_name);
+        let bar = progress_bar(name, shapes.len());
         for &(a, b) in shapes {
+            bar.set_message(format!("{a} @ {b}"));
             let samples = Sampler::new(&kernel, a, b).compute_samples(self.budget);
             self.rows.push(SummaryStats::new(name, a, b, &samples));
+            bar.inc(1);
         }
+        bar.finish_and_clear();
     }
 
     pub fn display(&self) {
@@ -51,6 +61,20 @@ impl Collector {
             );
         }
     }
+}
+
+/// A per-kernel bar: spinner, kernel name as bold prefix, elapsed time,
+/// the in-flight shape pair as the dimmed message, one tick per cell.
+fn progress_bar(kernel: &'static str, cells: usize) -> ProgressBar {
+    let template = "{spinner:.green} {prefix:20.bold.cyan} [{bar:30.cyan/blue}] {pos}/{len} {elapsed} {msg:.dim}";
+    let style = ProgressStyle::with_template(template)
+        .expect("static template is valid")
+        .progress_chars("=> ");
+    let bar = ProgressBar::new(cells as u64)
+        .with_style(style)
+        .with_prefix(kernel);
+    bar.enable_steady_tick(std::time::Duration::from_millis(200));
+    bar
 }
 
 /// One kernel x shape cell condensed from its [`Samples`], plus the
