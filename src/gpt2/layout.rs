@@ -113,6 +113,9 @@ pub struct Gpt2Views<'a> {
     /// `[n_vocab]`, last token only; outlives the pass until the next
     /// forward call overwrites it.
     pub logits: &'a mut [f32],
+    /// Matmul-kernel scratch, worst case over the five weight matmuls;
+    /// empty for kernels that need none.
+    pub matmul_kernel_scratch: &'a mut [f32],
 }
 
 /// Region sizes in floats, each pre-rounded, in carve order. Constructed once
@@ -130,6 +133,7 @@ pub struct Gpt2Layout {
     ffn_up: usize,
     proj_out: usize,
     logits: usize,
+    matmul_kernel_scratch: usize,
     // persistent tail: lives across passes
     kv_cache: usize,
 }
@@ -137,8 +141,10 @@ pub struct Gpt2Layout {
 impl Gpt2Layout {
     /// Sizes every region from the hyperparameters. `n_vocab` is passed
     /// separately: it is derived from the token-embedding tensor at weight
-    /// load, not from the `gpt2.*` metadata.
-    pub fn new(hp: &HParams, n_vocab: usize) -> Gpt2Layout {
+    /// load, not from the `gpt2.*` metadata. `kernel_scratch` is likewise a
+    /// plain float count the model computed from its matmul kernel: the
+    /// layout sizes the region without knowing any kernel type.
+    pub fn new(hp: &HParams, n_vocab: usize, matmul_kernel_scratch: usize) -> Gpt2Layout {
         let n_ctx = hp.n_ctx;
         let n_embd = hp.n_embd;
         Gpt2Layout {
@@ -150,6 +156,7 @@ impl Gpt2Layout {
             ffn_up: Arena::round_up(n_ctx * hp.n_ff),
             proj_out: Arena::round_up(n_ctx * n_embd),
             logits: Arena::round_up(n_vocab),
+            matmul_kernel_scratch: Arena::round_up(matmul_kernel_scratch),
             kv_cache: Arena::round_up(hp.n_layer * 2 * n_ctx * n_embd),
         }
     }
@@ -163,6 +170,7 @@ impl Gpt2Layout {
             + self.ffn_up
             + self.proj_out
             + self.logits
+            + self.matmul_kernel_scratch
     }
 
     pub fn persistent_total(&self) -> usize {
@@ -204,6 +212,7 @@ impl Gpt2Layout {
         let (ffn_up, rest) = rest.split_at_mut(self.ffn_up);
         let (proj_out, rest) = rest.split_at_mut(self.proj_out);
         let (logits, rest) = rest.split_at_mut(self.logits);
+        let (matmul_kernel_scratch, rest) = rest.split_at_mut(self.matmul_kernel_scratch);
         assert!(rest.is_empty(), "carve must exhaust the scratch partition");
         Gpt2Views {
             x,
@@ -214,6 +223,7 @@ impl Gpt2Layout {
             ffn_up,
             proj_out,
             logits,
+            matmul_kernel_scratch,
         }
     }
 }
@@ -237,10 +247,14 @@ mod tests {
 
     const N_VOCAB: usize = 50257;
 
+    /// An arbitrary non-zero kernel scratch ask, deliberately not a multiple
+    /// of [`Arena::ALIGN_FLOATS`] so the round-up is exercised.
+    const KERNEL_SCRATCH: usize = 1000;
+
     #[test]
     fn regions_match_the_dataflow_table() {
         let hp = small();
-        let layout = Gpt2Layout::new(&hp, N_VOCAB);
+        let layout = Gpt2Layout::new(&hp, N_VOCAB, KERNEL_SCRATCH);
         let mut arena = Arena::new(layout.total());
         let (scratch, persistent) = layout.split(&mut arena);
         assert_eq!(persistent.len(), 12 * 2 * 1024 * 768);
@@ -255,6 +269,18 @@ mod tests {
         assert_eq!(views.proj_out.len(), 1024 * 768);
         // n_vocab is not a multiple of 16; the region is rounded up
         assert_eq!(views.logits.len(), 50272);
+        // likewise the kernel scratch ask, 1000 -> 1008
+        assert_eq!(views.matmul_kernel_scratch.len(), 1008);
+    }
+
+    #[test]
+    fn a_zero_kernel_scratch_carves_an_empty_region() {
+        let hp = small();
+        let layout = Gpt2Layout::new(&hp, N_VOCAB, 0);
+        let mut arena = Arena::new(layout.total());
+        let (scratch, _) = layout.split(&mut arena);
+        let views = layout.carve_scratch(scratch);
+        assert!(views.matmul_kernel_scratch.is_empty());
     }
 
     #[test]
@@ -268,11 +294,11 @@ mod tests {
             n_layer: 2,
             eps: 1e-5,
         };
-        let layout = Gpt2Layout::new(&hp, 11);
+        let layout = Gpt2Layout::new(&hp, 11, 13);
         let mut arena = Arena::new(layout.total());
         let (scratch, mut persistent) = layout.split(&mut arena);
         let views = layout.carve_scratch(scratch);
-        let regions: [&[f32]; 9] = [
+        let regions: [&[f32]; 10] = [
             views.x,
             views.norm_out,
             views.qkv,
@@ -281,6 +307,7 @@ mod tests {
             views.ffn_up,
             views.proj_out,
             views.logits,
+            views.matmul_kernel_scratch,
             persistent.floats_mut(),
         ];
         for (i, region) in regions.iter().enumerate() {
@@ -296,7 +323,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not match the layout total")]
     fn split_rejects_a_mismatched_span() {
-        let layout = Gpt2Layout::new(&small(), N_VOCAB);
+        let layout = Gpt2Layout::new(&small(), N_VOCAB, KERNEL_SCRATCH);
         let mut arena = Arena::new(layout.total() + Arena::ALIGN_FLOATS);
         let _ = layout.split(&mut arena);
     }
@@ -304,7 +331,7 @@ mod tests {
     #[test]
     fn poison_reaches_scratch_and_never_persistent() {
         let hp = small();
-        let layout = Gpt2Layout::new(&hp, N_VOCAB);
+        let layout = Gpt2Layout::new(&hp, N_VOCAB, KERNEL_SCRATCH);
         let mut arena = Arena::new(layout.total());
         let (mut scratch, mut persistent) = layout.split(&mut arena);
         scratch.poison();
@@ -320,8 +347,8 @@ mod tests {
     fn layouts_from_equal_hparams_are_identical() {
         // the stored-once rule leans on this: rebuilding from the same inputs
         // must not move any region
-        let a = Gpt2Layout::new(&small(), N_VOCAB);
-        let b = Gpt2Layout::new(&small(), N_VOCAB);
+        let a = Gpt2Layout::new(&small(), N_VOCAB, KERNEL_SCRATCH);
+        let b = Gpt2Layout::new(&small(), N_VOCAB, KERNEL_SCRATCH);
         assert_eq!(a, b);
     }
 }

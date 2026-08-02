@@ -1,5 +1,7 @@
 use crate::arena::poison;
-use crate::tensor::{Shape, TensorView, TensorViewMut, matmul, matmul_nn_causal, softmax_causal};
+use crate::tensor::{
+    Shape, TensorView, TensorViewMut, matmul_nn_causal, matmul_nt, softmax_causal,
+};
 
 /// Multi-head causal self-attention for one layer, over arena regions --
 /// no allocation, no mask tensor, no per-head copies.
@@ -46,15 +48,17 @@ pub fn multi_head_attention(
         let off = h * head_dim;
         let head_shape = |rows: usize| Shape::new(rows, head_dim);
 
-        let q_block = &qkv[off..(n_new - 1) * qkv_width + off + head_dim];
-        let q_h = TensorView::strided(q_block, head_shape(n_new), qkv_width);
-        let k_block = &keys[off..(n_kv - 1) * n_embd + off + head_dim];
-        let k_h = TensorView::strided(k_block, head_shape(n_kv), n_embd);
+        let q_shape = head_shape(n_new);
+        let q_block = &qkv[off..off + q_shape.strided_len(qkv_width)];
+        let q_h = TensorView::strided(q_block, q_shape, qkv_width);
+        let kv_shape = head_shape(n_kv);
+        let k_block = &keys[off..off + kv_shape.strided_len(n_embd)];
+        let k_h = TensorView::strided(k_block, kv_shape, n_embd);
 
         poison(scores);
         let scores_prefix = &mut scores[..n_new * n_kv];
         let scores_shape = Shape::new(n_new, n_kv);
-        matmul(
+        matmul_nt(
             q_h,
             k_h,
             TensorViewMut::contiguous(scores_prefix, scores_shape),
@@ -70,10 +74,10 @@ pub fn multi_head_attention(
             n_past,
         );
 
-        let v_block = &values[off..(n_kv - 1) * n_embd + off + head_dim];
-        let v_h = TensorView::strided(v_block, head_shape(n_kv), n_embd);
-        let out_block = &mut attn_out[off..(n_new - 1) * n_embd + off + head_dim];
-        let out_h = TensorViewMut::strided(out_block, head_shape(n_new), n_embd);
+        let v_block = &values[off..off + kv_shape.strided_len(n_embd)];
+        let v_h = TensorView::strided(v_block, kv_shape, n_embd);
+        let out_block = &mut attn_out[off..off + q_shape.strided_len(n_embd)];
+        let out_h = TensorViewMut::strided(out_block, q_shape, n_embd);
         let probs = TensorView::contiguous(&scores[..n_new * n_kv], scores_shape);
         matmul_nn_causal(probs, v_h, out_h, n_past);
     }

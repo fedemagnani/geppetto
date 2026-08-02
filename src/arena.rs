@@ -93,6 +93,10 @@ impl Arena {
     pub fn floats_mut(&mut self) -> &mut [f32] {
         &mut self.buf[self.start..self.start + self.len]
     }
+
+    pub fn floats(&self) -> &[f32] {
+        &self.buf[self.start..self.start + self.len]
+    }
 }
 
 /// Debug-build write-before-read tripwire: fills a scratch region with NaN so

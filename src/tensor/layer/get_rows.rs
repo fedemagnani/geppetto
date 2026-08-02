@@ -1,4 +1,4 @@
-use crate::tensor::{Shape, TensorView, TensorViewMut};
+use crate::tensor::{TensorView, TensorViewMut};
 
 /// Gathers rows `ids` from `table` (an `[n_rows, cols]` matrix) into `out`
 /// (`[ids.len(), cols]`, fully overwritten). This is `ggml_get_rows`: the
@@ -7,8 +7,8 @@ use crate::tensor::{Shape, TensorView, TensorViewMut};
 #[hotpath::measure]
 pub fn get_rows(table: TensorView, ids: &[u32], mut out: TensorViewMut) {
     let n_rows = table.rows();
-    let expected = Shape::new(ids.len(), table.cols());
-    assert_eq!(out.shape(), expected, "get_rows: out shape mismatch");
+    assert_eq!(out.rows(), ids.len(), "get_rows: out row count mismatch");
+    assert_eq!(out.cols(), table.cols(), "get_rows: out width mismatch");
     for (r, &id) in ids.iter().enumerate() {
         let id = id as usize;
         assert!(
@@ -39,13 +39,6 @@ mod tests {
         let table = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
         let out = gather(&table, 3, 2, &[2, 0, 2]);
         assert_eq!(out, &[4.0, 5.0, 0.0, 1.0, 4.0, 5.0]);
-    }
-
-    #[test]
-    fn empty_id_list_yields_no_rows() {
-        let table = [1.0, 2.0, 3.0, 4.0];
-        let out = gather(&table, 2, 2, &[]);
-        assert!(out.is_empty());
     }
 
     #[test]

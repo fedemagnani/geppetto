@@ -2,6 +2,8 @@
 //! xorshift, not the `rand` crate: the plan introduces `rand` in epoch 5 for
 //! sampling, and tests want reproducibility without a runtime dependency.
 
+use crate::tensor::{Shape, TensorView, TensorViewMut, matmul_nt};
+
 /// xorshift64* -- adequate for filling test buffers, not for sampling.
 pub struct Rng(u64);
 
@@ -47,6 +49,18 @@ pub fn naive_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f
             out[i * n + j] = acc;
         }
     }
+    out
+}
+
+/// `a [m, k] @ b^T [n, k]` through the [`matmul_nt`] driver, into a fresh
+/// buffer.
+pub fn matmul_vec(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    matmul_nt(
+        TensorView::contiguous(a, Shape::new(m, k)),
+        TensorView::contiguous(b, Shape::new(n, k)),
+        TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
+    );
     out
 }
 
