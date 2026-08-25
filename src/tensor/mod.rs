@@ -23,9 +23,10 @@ pub use activation::{gelu, softmax, softmax_causal};
 pub use dtype::DType;
 pub use error::TensorError;
 pub use ops::{
-    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotProduct, Fma, FmaDot, FmaMatMulNt,
-    MatmulNtKernel, NaiveDotProduct, NaiveMatMulNt, Unfused, add, matmul_nn, matmul_nn_causal,
-    matmul_nt,
+    DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductAutoVec, DotProductNaive, Fma,
+    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtNaive, MatMulNtNeonTiled,
+    MatMulNtPackedNeon, MatMulNtTiled, MatMulNtTiledFma, MatMulNtTiledUnfused, MatmulNtKernel,
+    PackedPanels, Unfused, add, matmul_nn, matmul_nn_causal, matmul_nt,
 };
 pub use shape::Shape;
 pub use view::{TensorView, TensorViewMut};

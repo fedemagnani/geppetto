@@ -18,7 +18,7 @@ mod workload;
 use std::time::Duration;
 
 use geppetto::bench::SampleBudget;
-use geppetto::tensor::{AutoVecDot, DotProduct, FmaDot, NaiveDotProduct};
+use geppetto::tensor::{DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductNaive};
 
 use crate::common::{Collector, progress_bar, short_type_name};
 use crate::workload::{DOTS_PER_CALL, Sampler};
@@ -33,15 +33,15 @@ fn main() {
     // seconds even with every lane width enrolled
     let budget = SampleBudget::new(Duration::from_millis(250), 5, 200);
     let mut collector = Collector::new(budget);
-    run_bench::<NaiveDotProduct>(&mut collector, &LENGTHS);
-    run_bench::<AutoVecDot<8>>(&mut collector, &LENGTHS);
-    run_bench::<AutoVecDot<16>>(&mut collector, &LENGTHS);
-    run_bench::<AutoVecDot<32>>(&mut collector, &LENGTHS);
-    run_bench::<AutoVecDot<64>>(&mut collector, &LENGTHS);
-    run_bench::<FmaDot<8>>(&mut collector, &LENGTHS);
-    run_bench::<FmaDot<16>>(&mut collector, &LENGTHS);
-    run_bench::<FmaDot<32>>(&mut collector, &LENGTHS);
-    run_bench::<FmaDot<64>>(&mut collector, &LENGTHS);
+    run_bench::<DotProductNaive>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecUnfused<8>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecUnfused<16>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecUnfused<32>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecUnfused<64>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecFma<8>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecFma<16>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecFma<32>>(&mut collector, &LENGTHS);
+    run_bench::<DotAutoVecFma<64>>(&mut collector, &LENGTHS);
     collector.display();
 }
 

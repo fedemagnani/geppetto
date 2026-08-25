@@ -7,7 +7,8 @@ mod mul;
 
 pub use add::add;
 pub use mul::{
-    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotProduct, Fma, FmaDot, FmaMatMulNt,
-    MatmulNtKernel, NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nn, matmul_nn_causal,
-    matmul_nt,
+    DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductAutoVec, DotProductNaive, Fma,
+    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtNaive, MatMulNtNeonTiled,
+    MatMulNtPackedNeon, MatMulNtTiled, MatMulNtTiledFma, MatMulNtTiledUnfused, MatmulNtKernel,
+    PackedPanels, Unfused, matmul_nn, matmul_nn_causal, matmul_nt,
 };

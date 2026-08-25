@@ -22,13 +22,13 @@ pub use state::Gpt2State;
 pub use weights::{Gpt2TransformerWeights, Gpt2Weights};
 
 use crate::gguf::GgufFile;
-use crate::tensor::{AutoVecMatMulNt, MatmulNtKernel};
+use crate::tensor::{MatMulNtPackedNeon, MatmulNtKernel};
 
 /// The model, generic over the matmul kernel its five weight matmuls run
 /// through (the Q@K^T score matmul in attention stays on the raw
 /// [`matmul_nt`](crate::tensor::matmul_nt)). Weights are packed into the kernel's
 /// format once at load; swapping kernels is a type parameter, not a rewire.
-pub struct Gpt2Model<K: MatmulNtKernel = AutoVecMatMulNt> {
+pub struct Gpt2Model<K: MatmulNtKernel = MatMulNtPackedNeon> {
     /// Hyperparameters
     hparams: HParams,
     /// Model weights, linear ones in the kernel's packed format
@@ -38,9 +38,9 @@ pub struct Gpt2Model<K: MatmulNtKernel = AutoVecMatMulNt> {
 }
 
 impl Gpt2Model {
-    /// Loads with the default [`AutoVecMatMulNt`] kernel.
+    /// Loads with the default [`PackedNeonMatMulNt`] kernel.
     pub fn from_gguf(file: &GgufFile) -> Result<Gpt2Model, ModelError> {
-        Gpt2Model::with_kernel(file, AutoVecMatMulNt::default())
+        Gpt2Model::with_kernel(file, MatMulNtPackedNeon)
     }
 }
 

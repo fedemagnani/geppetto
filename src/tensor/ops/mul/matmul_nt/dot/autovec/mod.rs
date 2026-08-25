@@ -8,7 +8,7 @@
 
 use std::marker::PhantomData;
 
-use super::{DotMatMulNt, DotProduct};
+use super::{DotProduct, MatMulNtDot};
 
 mod fma;
 mod unfused;
@@ -55,23 +55,24 @@ pub trait MulAdd {
 ///
 /// [`NaiveDotProduct`]: super::NaiveDotProduct
 #[derive(Debug, Default, Clone, Copy)]
-pub struct AutoVecDotProduct<A, const LANES: usize = DEFAULT_LANES> {
+pub struct DotProductAutoVec<A, const LANES: usize = DEFAULT_LANES> {
     _strategy: PhantomData<A>,
 }
 
 /// The chunked dot with plain mul-then-add lanes.
-pub type AutoVecDot<const LANES: usize = DEFAULT_LANES> = AutoVecDotProduct<Unfused, LANES>;
+pub type DotAutoVecUnfused<const LANES: usize = DEFAULT_LANES> = DotProductAutoVec<Unfused, LANES>;
 
 /// The chunked dot with explicitly fused lanes.
-pub type FmaDot<const LANES: usize = DEFAULT_LANES> = AutoVecDotProduct<Fma, LANES>;
+pub type DotAutoVecFma<const LANES: usize = DEFAULT_LANES> = DotProductAutoVec<Fma, LANES>;
 
 /// The chunked kernel with plain mul-then-add lanes.
-pub type AutoVecMatMulNt<const LANES: usize = DEFAULT_LANES> = DotMatMulNt<AutoVecDot<LANES>>;
+pub type MatMulNtAutoVecUnfused<const LANES: usize = DEFAULT_LANES> =
+    MatMulNtDot<DotAutoVecUnfused<LANES>>;
 
 /// The chunked kernel with explicitly fused lanes.
-pub type FmaMatMulNt<const LANES: usize = DEFAULT_LANES> = DotMatMulNt<FmaDot<LANES>>;
+pub type MatMulNtAutoVecFma<const LANES: usize = DEFAULT_LANES> = MatMulNtDot<DotAutoVecFma<LANES>>;
 
-impl<A: MulAdd, const LANES: usize> DotProduct for AutoVecDotProduct<A, LANES> {
+impl<A: MulAdd, const LANES: usize> DotProduct for DotProductAutoVec<A, LANES> {
     #[inline(always)]
     fn dot(a: &[f32], b: &[f32]) -> f32 {
         let a_chunks = a.chunks_exact(LANES);

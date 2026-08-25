@@ -1,16 +1,24 @@
-//! The `a @ b^T` weight matmul: the [`MatmulNtKernel`] seam here, and the
+//! The `a @ b^T` weight matmul: the [`MatmulNtKernel`] seam here, the
 //! dot-product kernel family -- [`matmul_nt`] driver, [`NaiveMatMulNt`]
-//! baseline, chunked research kernels -- in `dot`.
+//! baseline, chunked research kernels -- in `dot`, and the register-tiled
+//! GEMV family in `tiled`.
 
 mod dot;
+mod neon;
+mod packed;
+mod tiled;
 
 #[cfg(test)]
 mod tests;
 
 pub use dot::{
-    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, DotMatMulNt, DotProduct, Fma, FmaDot,
-    FmaMatMulNt, MulAdd, NaiveDotProduct, NaiveMatMulNt, Unfused, matmul_nt,
+    DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductAutoVec, DotProductNaive, Fma,
+    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtDot, MatMulNtNaive, MulAdd, Unfused,
+    matmul_nt,
 };
+pub use neon::MatMulNtNeonTiled;
+pub use packed::{MatMulNtPackedNeon, PackedPanels};
+pub use tiled::{MatMulNtTiled, MatMulNtTiledFma, MatMulNtTiledUnfused};
 
 use crate::tensor::{TensorView, TensorViewMut, WeightTensor};
 

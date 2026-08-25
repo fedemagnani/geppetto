@@ -18,7 +18,10 @@ mod workload;
 use std::time::Duration;
 
 use geppetto::bench::SampleBudget;
-use geppetto::tensor::{AutoVecMatMulNt, FmaMatMulNt, MatmulNtKernel, NaiveMatMulNt, Shape};
+use geppetto::tensor::{
+    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtNaive, MatMulNtNeonTiled,
+    MatMulNtPackedNeon, MatMulNtTiledFma, MatMulNtTiledUnfused, MatmulNtKernel, Shape,
+};
 
 use crate::common::{Collector, progress_bar, short_type_name};
 use crate::workload::Sampler;
@@ -43,15 +46,36 @@ fn main() {
     // keep the whole run in tens of seconds
     let budget = SampleBudget::new(Duration::from_millis(250), 5, 200);
     let mut collector = Collector::new(budget);
-    run_bench::<NaiveMatMulNt>(&mut collector, &SHAPES);
-    run_bench::<AutoVecMatMulNt<8>>(&mut collector, &SHAPES);
-    run_bench::<AutoVecMatMulNt<16>>(&mut collector, &SHAPES);
-    run_bench::<AutoVecMatMulNt<32>>(&mut collector, &SHAPES);
-    run_bench::<AutoVecMatMulNt<64>>(&mut collector, &SHAPES);
-    run_bench::<FmaMatMulNt<8>>(&mut collector, &SHAPES);
-    run_bench::<FmaMatMulNt<16>>(&mut collector, &SHAPES);
-    run_bench::<FmaMatMulNt<32>>(&mut collector, &SHAPES);
-    run_bench::<FmaMatMulNt<64>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtNaive>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecUnfused<8>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecUnfused<16>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecUnfused<32>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecUnfused<64>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecFma<8>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecFma<16>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecFma<32>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtAutoVecFma<64>>(&mut collector, &SHAPES);
+
+    run_bench::<MatMulNtTiledUnfused<2, 16>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledUnfused<4, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledUnfused<4, 8>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledFma<2, 16>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledFma<4, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledFma<4, 8>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledFma<4, 16>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledFma<8, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtTiledFma<8, 8>>(&mut collector, &SHAPES);
+
+    run_bench::<MatMulNtNeonTiled<2, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtNeonTiled<4, 2>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtNeonTiled<4, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtNeonTiled<6, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtNeonTiled<8, 2>>(&mut collector, &SHAPES);
+
+    run_bench::<MatMulNtPackedNeon<2, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtPackedNeon<4, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtPackedNeon<6, 4>>(&mut collector, &SHAPES);
+    run_bench::<MatMulNtPackedNeon<8, 2>>(&mut collector, &SHAPES);
     collector.display();
 }
 

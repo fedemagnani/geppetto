@@ -13,9 +13,10 @@ mod autovec;
 mod naive;
 
 pub use autovec::{
-    AutoVecDot, AutoVecDotProduct, AutoVecMatMulNt, Fma, FmaDot, FmaMatMulNt, MulAdd, Unfused,
+    DotAutoVecFma, DotAutoVecUnfused, DotProductAutoVec, Fma, MatMulNtAutoVecFma,
+    MatMulNtAutoVecUnfused, MulAdd, Unfused,
 };
-pub use naive::{NaiveDotProduct, NaiveMatMulNt, matmul_nt};
+pub use naive::{DotProductNaive, MatMulNtNaive, matmul_nt};
 
 use std::marker::PhantomData;
 
@@ -31,11 +32,11 @@ pub trait DotProduct {
 /// weight convention of [`matmul_nt`], with raw weights (identity pack)
 /// and zero scratch. Swapping the dot is swapping the kernel.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DotMatMulNt<D> {
+pub struct MatMulNtDot<D> {
     _dot: PhantomData<D>,
 }
 
-impl<D: DotProduct> MatmulNtKernel for DotMatMulNt<D> {
+impl<D: DotProduct> MatmulNtKernel for MatMulNtDot<D> {
     type Weights = WeightTensor;
 
     fn pack(&self, b: WeightTensor) -> WeightTensor {
