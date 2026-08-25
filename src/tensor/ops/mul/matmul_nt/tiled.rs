@@ -17,7 +17,8 @@
 
 use std::marker::PhantomData;
 
-use super::{DotProduct, DotProductAutoVec, Fma, MulAdd, Unfused};
+use super::{DotProduct, DotProductAutoVec};
+use crate::tensor::ops::mul_add::{Fma, MulAdd, Unfused};
 use crate::tensor::{MatmulNtKernel, Shape, TensorView, TensorViewMut, WeightTensor};
 
 /// The row-tiled kernel: `out[i, j..j+ROWS] = tile(a row i, b rows j..)`,

@@ -16,7 +16,8 @@
 
 use std::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vld1q_f32};
 
-use super::{DotProduct, DotProductAutoVec, Fma};
+use super::{DotProduct, DotProductAutoVec};
+use crate::tensor::ops::mul_add::Fma;
 use crate::tensor::{MatmulNtKernel, Shape, TensorView, TensorViewMut, WeightTensor};
 
 /// f32 lanes in one 128-bit NEON vector.

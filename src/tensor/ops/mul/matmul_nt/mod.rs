@@ -12,9 +12,8 @@ mod tiled;
 mod tests;
 
 pub use dot::{
-    DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductAutoVec, DotProductNaive, Fma,
-    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtDot, MatMulNtNaive, MulAdd, Unfused,
-    matmul_nt,
+    DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductAutoVec, DotProductNaive,
+    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtDot, MatMulNtNaive, matmul_nt,
 };
 pub use neon::MatMulNtNeonTiled;
 pub use packed::{MatMulNtPackedNeon, PackedPanels};

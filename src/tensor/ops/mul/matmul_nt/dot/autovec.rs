@@ -1,20 +1,15 @@
 //! The chunked-accumulator dots: swappable lane arithmetic under one
 //! chunk/tail/reduce scaffold.
 //!
-//! [`AutoVecDotProduct`] implements [`DotProduct`] for the whole family; a
-//! submodule contributes only a [`MulAdd`] impl, the single expression
-//! saying how one lane folds a product into its running total. That
-//! expression is the entire experiment.
+//! [`DotProductAutoVec`] implements [`DotProduct`] for the whole family; a
+//! [`MulAdd`] strategy contributes only the single expression saying how
+//! one lane folds a product into its running total. That expression is
+//! the entire experiment.
 
 use std::marker::PhantomData;
 
 use super::{DotProduct, MatMulNtDot};
-
-mod fma;
-mod unfused;
-
-pub use fma::Fma;
-pub use unfused::Unfused;
+use crate::tensor::ops::mul_add::{Fma, MulAdd, Unfused};
 
 /// Bytes of one aarch64 NEON vector register: 128 bits wide.
 const BYTES_IN_VECTOR_REGISTER: usize = 128 / 8;
@@ -33,13 +28,6 @@ const ACC_VECTORS: usize = 4;
 
 /// The default lane count: every accumulator vector full, no more.
 const DEFAULT_LANES: usize = FLOATS_IN_REGISTER * ACC_VECTORS;
-
-/// How one lane folds a product into its running total, in the argument
-/// order of [`f32::mul_add`]: `x * y + acc`. The only thing that
-/// distinguishes dots of the chunked family.
-pub trait MulAdd {
-    fn mul_add(x: f32, y: f32, acc: f32) -> f32;
-}
 
 /// The [`NaiveDotProduct`] with its serial dependency chain broken:
 /// `LANES` independent partial sums via the strategy `A`, combined at the

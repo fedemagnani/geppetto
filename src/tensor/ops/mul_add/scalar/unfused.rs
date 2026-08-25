@@ -1,4 +1,4 @@
-use super::MulAdd;
+use crate::tensor::ops::mul_add::MulAdd;
 
 /// Plain mul-then-add: two IEEE operations, two roundings, compiling to a
 /// `fmul.4s` + `fadd.4s` pair per accumulator vector. The accumulator

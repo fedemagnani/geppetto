@@ -13,8 +13,7 @@ mod autovec;
 mod naive;
 
 pub use autovec::{
-    DotAutoVecFma, DotAutoVecUnfused, DotProductAutoVec, Fma, MatMulNtAutoVecFma,
-    MatMulNtAutoVecUnfused, MulAdd, Unfused,
+    DotAutoVecFma, DotAutoVecUnfused, DotProductAutoVec, MatMulNtAutoVecFma, MatMulNtAutoVecUnfused,
 };
 pub use naive::{DotProductNaive, MatMulNtNaive, matmul_nt};
 
