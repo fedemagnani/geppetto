@@ -1,14 +1,14 @@
 use crate::tensor::{TensorView, TensorViewMut};
 
-use super::{DotMatMulNt, DotProduct, matmul_nt_dot};
+use super::{DotProduct, MatMulNtDot, matmul_nt_dot};
 
 /// The serial dot: one accumulator, one dependency chain, the order the
 /// source spells. Slow on purpose -- it is the semantic baseline every
 /// research dot is compared against.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct NaiveDotProduct;
+pub struct DotProductNaive;
 
-impl DotProduct for NaiveDotProduct {
+impl DotProduct for DotProductNaive {
     #[inline(always)]
     fn dot(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -17,7 +17,7 @@ impl DotProduct for NaiveDotProduct {
 
 /// The baseline kernel: raw weights, no scratch, the triple loop of
 /// [`matmul_nt`]. Every research kernel benchmarks against this.
-pub type NaiveMatMulNt = DotMatMulNt<NaiveDotProduct>;
+pub type MatMulNtNaive = MatMulNtDot<DotProductNaive>;
 
 /// Matrix multiply in the ggml/GGUF weight convention.
 ///
@@ -38,5 +38,5 @@ pub type NaiveMatMulNt = DotMatMulNt<NaiveDotProduct>;
 ///
 /// [`matmul_nn`]: crate::tensor::matmul_nn()
 pub fn matmul_nt(a: TensorView, b: TensorView, out: TensorViewMut) {
-    matmul_nt_dot::<NaiveDotProduct>(a, b, out);
+    matmul_nt_dot::<DotProductNaive>(a, b, out);
 }

@@ -1,4 +1,4 @@
-use super::MulAdd;
+use crate::tensor::ops::mul_add::MulAdd;
 
 /// Explicitly fused multiply-add: [`f32::mul_add`], one `fmla.4s` per
 /// accumulator vector where [`Unfused`] emits a `fmul.4s` + `fadd.4s`

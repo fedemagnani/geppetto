@@ -1,14 +1,15 @@
-//! Result collection and the CLI table.
+//! The kernel-agnostic half of a microkernel bench target: the result
+//! collector with its CLI table, the per-kernel progress bar and the
+//! type-name shortener. Each bench includes this via `#[path]` and keeps
+//! for itself what a cell measures -- its workload and the driver loop
+//! that knows how to construct one.
 
 use geppetto::bench::{SampleBudget, Samples};
-use geppetto::tensor::{MatmulNtKernel, Shape};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::workload::Sampler;
-
-/// Accumulates one [`SummaryStats`] row per kernel x shape, then renders
-/// them as a table. Kernels are named by their type, so adding one to the
-/// run is a turbofish, not a string.
+/// Accumulates one [`SummaryStats`] row per kernel x workload cell, then
+/// renders them as a table. It never runs anything: the owning bench
+/// samples a cell and hands the result to [`record`](Collector::record).
 pub struct Collector {
     budget: SampleBudget,
     rows: Vec<SummaryStats>,
@@ -22,38 +23,29 @@ impl Collector {
         }
     }
 
-    /// Benchmarks `K` over every shape pair, labelled with the last
-    /// segment of the type's path.
-    ///
-    /// The progress bar (stderr, cleared on finish) advances only between
-    /// cells; the steady tick that animates the spinner redraws from its
-    /// own thread every 200ms, a ~microsecond stderr write the median/MAD
-    /// statistics absorb without a trace.
-    pub fn run_bench<K: MatmulNtKernel + Default>(&mut self, shapes: &[(Shape, Shape)]) {
-        let kernel = K::default();
-        let name = short_type_name(std::any::type_name::<K>());
-        let bar = progress_bar(&name, shapes.len());
-        for &(a, b) in shapes {
-            bar.set_message(format!("{a} @ {b}"));
-            let samples = Sampler::new(&kernel, a, b).compute_samples(self.budget);
-            self.rows
-                .push(SummaryStats::new(name.clone(), a, b, &samples));
-            bar.inc(1);
-        }
-        bar.finish_and_clear();
+    /// The budget every cell samples under, so a bench's driver loop reads
+    /// it from here instead of threading a second copy around.
+    pub fn budget(&self) -> SampleBudget {
+        self.budget
+    }
+
+    /// Adds one cell: `workload` labels the row, `flops` is the floating
+    /// point work of one timed call at that cell.
+    pub fn record(&mut self, kernel: &str, workload: String, flops: f64, samples: &Samples) {
+        let row = SummaryStats::new(kernel.to_string(), workload, flops, samples);
+        self.rows.push(row);
     }
 
     pub fn display(&self) {
         println!(
-            "{:<43} {:>12} {:>14} {:>12} {:>12} {:>8} {:>9}",
-            "kernel", "a", "b", "p50", "p95", "spread", "GFLOP/s"
+            "{:<43} {:>27} {:>12} {:>12} {:>8} {:>9}",
+            "kernel", "workload", "p50", "p95", "spread", "GFLOP/s"
         );
         for row in &self.rows {
             println!(
-                "{:<43} {:>12} {:>14} {:>12} {:>12} {:>7.1}% {:>9.2}",
+                "{:<43} {:>27} {:>12} {:>12} {:>7.1}% {:>9.2}",
                 row.kernel,
-                row.a.to_string(),
-                row.b.to_string(),
+                row.workload,
                 format_seconds(row.p50),
                 format_seconds(row.p95),
                 row.spread * 100.0,
@@ -66,7 +58,7 @@ impl Collector {
 /// Drops every module path from a `type_name`, including inside generic
 /// arguments: `a::b::AutoVecDotProduct<a::b::Unfused, 8>` becomes
 /// `AutoVecDotProduct<Unfused, 8>` -- what the source spells.
-fn short_type_name(full: &str) -> String {
+pub fn short_type_name(full: &str) -> String {
     let mut out = String::new();
     let mut segment = String::new();
     for c in full.chars() {
@@ -85,8 +77,13 @@ fn short_type_name(full: &str) -> String {
 }
 
 /// A per-kernel bar: spinner, kernel name as bold prefix, elapsed time,
-/// the in-flight shape pair as the dimmed message, one tick per cell.
-fn progress_bar(kernel: &str, cells: usize) -> ProgressBar {
+/// the in-flight workload as the dimmed message, one tick per cell.
+///
+/// The bar lives on stderr and clears on finish; the steady tick that
+/// animates the spinner redraws from its own thread every 200ms, a
+/// ~microsecond stderr write the median/MAD statistics absorb without a
+/// trace.
+pub fn progress_bar(kernel: &str, cells: usize) -> ProgressBar {
     let template = "{spinner:.green} {prefix:43.bold.cyan} [{bar:30.cyan/blue}] {pos}/{len} {elapsed} {msg:.dim}";
     let style = ProgressStyle::with_template(template)
         .expect("static template is valid")
@@ -98,12 +95,11 @@ fn progress_bar(kernel: &str, cells: usize) -> ProgressBar {
     bar
 }
 
-/// One kernel x shape cell condensed from its [`Samples`], plus the
+/// One kernel x workload cell condensed from its [`Samples`], plus the
 /// identity of what was measured.
 struct SummaryStats {
     kernel: String,
-    a: Shape,
-    b: Shape,
+    workload: String,
     p50: f64,
     p95: f64,
     spread: f64,
@@ -111,13 +107,11 @@ struct SummaryStats {
 }
 
 impl SummaryStats {
-    fn new(kernel: String, a: Shape, b: Shape, samples: &Samples) -> SummaryStats {
+    fn new(kernel: String, workload: String, flops: f64, samples: &Samples) -> SummaryStats {
         let p50 = samples.median();
-        let flops = (2 * a.rows() * a.cols() * b.cols()) as f64;
         SummaryStats {
             kernel,
-            a,
-            b,
+            workload,
             p50,
             p95: samples.percentile(0.95),
             spread: samples.relative_spread(),

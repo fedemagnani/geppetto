@@ -14,4 +14,9 @@ mod tests;
 
 pub use matmul_nn::matmul_nn;
 pub use matmul_nn_causal::matmul_nn_causal;
-pub use matmul_nt::{AutoVecMatMulNt, FmaMatMulNt, MatmulNtKernel, NaiveMatMulNt, matmul_nt};
+pub use matmul_nt::{
+    DotAutoVecFma, DotAutoVecUnfused, DotProduct, DotProductAutoVec, DotProductNaive,
+    MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtNaive, MatMulNtNeonTiled,
+    MatMulNtPackedNeon, MatMulNtTiled, MatMulNtTiledFma, MatMulNtTiledUnfused, MatmulNtKernel,
+    PackedPanels, matmul_nt,
+};

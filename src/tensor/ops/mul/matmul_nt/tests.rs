@@ -2,7 +2,8 @@ use bytes::Bytes;
 
 use crate::tensor::test::{Rng, assert_close, matmul_vec, naive_matmul};
 use crate::tensor::{
-    AutoVecMatMulNt, DType, FmaMatMulNt, MatmulNtKernel, Shape, TensorView, TensorViewMut,
+    DType, MatMulNtAutoVecFma, MatMulNtAutoVecUnfused, MatMulNtNeonTiled, MatMulNtPackedNeon,
+    MatMulNtTiledFma, MatMulNtTiledUnfused, MatmulNtKernel, Shape, TensorView, TensorViewMut,
     WeightTensor, matmul_nt,
 };
 
@@ -59,11 +60,12 @@ fn weight_tensor(values: &[f32], n: usize, k: usize) -> WeightTensor {
     WeightTensor::from_gguf_bytes(DType::F32, Shape::new(n, k), bytes).unwrap()
 }
 
-/// Agreement check every raw-weight research kernel goes through, over
-/// shapes straddling the LANES=16 boundary: tail-only k (1, 7, 15), exact
+/// Agreement check every research kernel goes through, over shapes
+/// straddling the LANES=16 boundary: tail-only k (1, 7, 15), exact
 /// multiples (16, 1280), mixed (17, 33); (1, 1280, 8) is a decode GEMV
-/// shape.
-fn assert_kernel_agrees_with_naive(kernel: &impl MatmulNtKernel<Weights = WeightTensor>) {
+/// shape. Scratch is sized as the kernel asks and NaN-poisoned, per the
+/// unspecified-on-entry contract.
+fn assert_kernel_agrees_with_naive(kernel: &impl MatmulNtKernel) {
     let mut rng = Rng::new(0x5EED);
     let shapes = [
         (1, 1, 1),
@@ -78,14 +80,14 @@ fn assert_kernel_agrees_with_naive(kernel: &impl MatmulNtKernel<Weights = Weight
         let input = rng.vec(m * k, 3.0);
         let weight = rng.vec(n * k, 3.0);
         let packed = kernel.pack(weight_tensor(&weight, n, k));
-        assert_eq!(kernel.scratch_len(m, k, n), 0);
+        let mut scratch = vec![f32::NAN; kernel.scratch_len(m, k, n)];
 
         let mut out = vec![f32::NAN; m * n];
         kernel.matmul_nt(
             TensorView::contiguous(&input, Shape::new(m, k)),
             &packed,
             TensorViewMut::contiguous(&mut out, Shape::new(m, n)),
-            &mut [],
+            &mut scratch,
         );
         // reassociated (and, for fma, fused) accumulation drifts from the
         // serial reference by rounding; at k=1280 dots reach ~1e2, putting
@@ -99,19 +101,50 @@ fn unrolled_kernel_agrees_with_naive_on_random_shapes() {
     // a type alias is not a value constructor, and the bare underlying
     // name would not apply the LANES default; the annotated default() does
     // both
-    let kernel: AutoVecMatMulNt = AutoVecMatMulNt::default();
+    let kernel: MatMulNtAutoVecUnfused = MatMulNtAutoVecUnfused::default();
     assert_kernel_agrees_with_naive(&kernel);
 }
 
 #[test]
 fn fma_kernel_agrees_with_naive_on_random_shapes() {
-    let kernel: FmaMatMulNt = FmaMatMulNt::default();
+    let kernel: MatMulNtAutoVecFma = MatMulNtAutoVecFma::default();
     assert_kernel_agrees_with_naive(&kernel);
 }
 
 #[test]
+fn tiled_kernel_agrees_with_naive_on_random_shapes() {
+    // the agreement shapes' n values (1..8) exercise every tile-tail
+    // width for ROWS = 4 and the all-tail case for ROWS = 8
+    assert_kernel_agrees_with_naive(&MatMulNtTiledUnfused::<4, 4>::default());
+    assert_kernel_agrees_with_naive(&MatMulNtTiledFma::<4, 4>::default());
+    assert_kernel_agrees_with_naive(&MatMulNtTiledFma::<2, 16>::default());
+    assert_kernel_agrees_with_naive(&MatMulNtTiledFma::<4, 8>::default());
+    assert_kernel_agrees_with_naive(&MatMulNtTiledFma::<8, 8>::default());
+}
+
+#[test]
+fn neon_kernel_agrees_with_naive_on_random_shapes() {
+    assert_kernel_agrees_with_naive(&MatMulNtNeonTiled::<2, 4>);
+    assert_kernel_agrees_with_naive(&MatMulNtNeonTiled::<4, 2>);
+    assert_kernel_agrees_with_naive(&MatMulNtNeonTiled::<4, 4>);
+    assert_kernel_agrees_with_naive(&MatMulNtNeonTiled::<8, 2>);
+    assert_kernel_agrees_with_naive(&MatMulNtNeonTiled::<1, 1>);
+}
+
+#[test]
+fn packed_kernel_agrees_with_naive_on_random_shapes() {
+    // the shapes' n (1..8) and k (1..33) exercise partial last panels,
+    // all-padding chunks and the padded-activation copy
+    assert_kernel_agrees_with_naive(&MatMulNtPackedNeon::<2, 4>);
+    assert_kernel_agrees_with_naive(&MatMulNtPackedNeon::<4, 2>);
+    assert_kernel_agrees_with_naive(&MatMulNtPackedNeon::<4, 4>);
+    assert_kernel_agrees_with_naive(&MatMulNtPackedNeon::<8, 2>);
+    assert_kernel_agrees_with_naive(&MatMulNtPackedNeon::<1, 1>);
+}
+
+#[test]
 fn unrolled_pack_is_the_identity() {
-    let kernel: AutoVecMatMulNt = AutoVecMatMulNt::default();
+    let kernel: MatMulNtAutoVecUnfused = MatMulNtAutoVecUnfused::default();
     let values: Vec<f32> = (0..8).map(|x| x as f32).collect();
     let raw = weight_tensor(&values, 2, 4);
     let raw_ptr = raw.data().as_ptr();
